@@ -1,0 +1,25 @@
+{
+  "stocks": [
+    {
+      "id": "TST-01",
+      "nameKey": "stockmarket/stock/tst01/name",
+      "currency": "RUB",
+      "initialPrice": 100.00,
+      "meanPrice": 100.00,
+      "minPrice": 1.0,
+      "maxPrice": 1000000.0,
+      "tickSize": 0.01,
+      "volatility": 0.006,
+      "meanReversion": 0.02,
+      "drift": 0.0,
+      "quietVolatilityScale": 0.35,
+      "activeVolatilityScale": 2.0,
+      "regimeActivateChance": 0.04,
+      "regimeCalmChance": 0.25,
+      "jumpChance": 0.005,
+      "jumpScale": 3.0,
+      "baseVolume": 1000,
+      "enabled": true
+    }
+  ]
+}

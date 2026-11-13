@@ -1,0 +1,5 @@
+{
+  "feeRate": 0.0,
+  "mailLifetimeSeconds": 604800,
+  "enableDevRoutes": false
+}

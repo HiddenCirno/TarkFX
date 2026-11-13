@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+    <AssemblyName>TarkFX.StockMarket.Server</AssemblyName>
+    <RootNamespace>TarkFX.StockMarket.Server</RootNamespace>
+    <Version>0.1.0</Version>
+    <SptRoot Condition="'$(SptRoot)' == ''">I:\TKF</SptRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="SemanticVersioning">
+      <HintPath>$(SptRoot)\SPT_Runtime\SemanticVersioning.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SPTarkov.Common">
+      <HintPath>$(SptRoot)\SPT_Runtime\SPTarkov.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SPTarkov.DI">
+      <HintPath>$(SptRoot)\SPT_Runtime\SPTarkov.DI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SPTarkov.Reflection">
+      <HintPath>$(SptRoot)\SPT_Runtime\SPTarkov.Reflection.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SPTarkov.Server.Core">
+      <HintPath>$(SptRoot)\SPT_Runtime\SPTarkov.Server.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <StockConfig Include="config\**\*.json" />
+    <StockLocales Include="locales\**\*.json" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <InstallDir>$(SptRoot)\SPT_Runtime\user\mods\TarkFX.StockMarket</InstallDir>
+  </PropertyGroup>
+
+  <Target Name="DeployServer" AfterTargets="Build" Condition="'$(SkipDeploy)' != 'true'">
+    <MakeDir Directories="$(InstallDir);$(InstallDir)\config;$(InstallDir)\locales" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(InstallDir)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(StockConfig)" DestinationFolder="$(InstallDir)\config" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(StockLocales)" DestinationFolder="$(InstallDir)\locales" SkipUnchangedFiles="false" />
+  </Target>
+
+</Project>

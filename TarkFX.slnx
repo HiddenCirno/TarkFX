@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/StockMarket/" />
+  <Folder Name="/StockMarket/Client/">
+    <Project Path="StockMarket/Client/TarkFX.StockMarket.Client.csproj" />
+  </Folder>
+  <Folder Name="/StockMarket/Server/">
+    <Project Path="StockMarket/Server/TarkFX.StockMarket.Server.csproj" />
+  </Folder>
+</Solution>
