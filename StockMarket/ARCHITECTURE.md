@@ -659,6 +659,8 @@ StockMarket/
   分红总额 = 该玩家该股票当日到期的持股数 × 每股分红
   ```
 - 分红通过系统邮件发放，币种跟随股票（RUB/USD/EUR）。
+- **欠债期间分红同样被冻结**：到期检查时若该玩家有欠债，本期分红作废（不顺延），
+  与"持仓冻结"保持一致。
 - 由 `MarketRunner` 在每个 tick 推进后调用，离线补算时在历史周年 tick 上逐次结算。
 - 日志：`[StockMarket] 分红 profile / stock: N 股 × P = amount`。
 
@@ -670,3 +672,21 @@ StockMarket/
 - 平多头/开空的费用按**成交总额**计算；平多头时费用从结算中扣除，
   结算为负则连同费用一起记入欠债；开空时费用从冻结卖出款中扣除。
 - 强平完全不计手续费。
+
+### 11.8 平账时机
+
+| 场景 | Hook |
+|---|---|
+| 转生（Prestige） | `PrestigeHelper.ProcessPendingPrestige` 后置 |
+| 启动器手动 Wipe | `LauncherV2Controller.Wipe` 后置（按用户名找到 profileId） |
+| 启动器删除档案 | `SaveServer.RemoveProfile` 后置 |
+
+三种入口都调用 `PortfolioStore.ResetProfile`：清空债务/现货/杠杆/空头，
+归还券源，**不产生行情冲击、不发邮件**。
+
+### 11.9 客户端配色
+
+- 涨跌幅文字、买入/卖出按钮底色跟随 `RedUpGreenDown` 配置；
+- **欠债**使用"下跌色" `ClientConfig.DownColor`：A 股模式（红涨绿跌）为绿色，
+  美股模式（绿涨红跌）为红色；
+- 其余信息行（持仓/保证金/权益等）保持中性色，不随皮肤变化。

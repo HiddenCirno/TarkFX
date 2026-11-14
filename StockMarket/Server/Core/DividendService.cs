@@ -52,11 +52,22 @@ public sealed class DividendService(
 
         var sharesByKey = new Dictionary<(string ProfileId, string StockId), int>();
         var quotes = new Dictionary<string, StockQuote?>(StringComparer.OrdinalIgnoreCase);
+        var debtBlocked = new Dictionary<string, bool>(StringComparer.Ordinal);
 
         foreach (SpotLotSnapshot lot in lots)
         {
             long elapsed = tick - lot.BuyTick;
             if (elapsed <= 0 || elapsed % TicksPerCycle != 0)
+                continue;
+
+            // 欠债期间持仓冻结，分红同样不发（当期作废，不顺延）
+            if (!debtBlocked.TryGetValue(lot.ProfileId, out bool hasDebt))
+            {
+                hasDebt = portfolios.HasDebt(lot.ProfileId);
+                debtBlocked[lot.ProfileId] = hasDebt;
+            }
+
+            if (hasDebt)
                 continue;
 
             if (!quotes.TryGetValue(lot.StockId, out StockQuote? quote))

@@ -311,7 +311,8 @@ namespace TarkFX.StockMarket.Client.UI
             _equity = CreateTopLabel(side.transform, "Equity", 426f, 26f, 16f, TextAlignmentOptions.MidlineLeft);
             _liq = CreateTopLabel(side.transform, "Liquidation", 452f, 26f, 16f, TextAlignmentOptions.MidlineLeft);
             _debt = CreateTopLabel(side.transform, "Debt", 480f, 24f, 15f, TextAlignmentOptions.MidlineLeft);
-            _debt.color = new Color(0.95f, 0.35f, 0.35f, 1f);
+            // 欠债 = 亏损，用"下跌色"，跟随红涨绿跌/绿涨红跌设置
+            _debt.color = ClientConfig.DownColor;
 
             BuildRepayRow(side.transform, 506f, 36f);
 
@@ -761,6 +762,7 @@ namespace TarkFX.StockMarket.Client.UI
             _debt.text = "stockmarket/ui/debt".Localized() + ": " +
                          _currentSymbol + Format(state.Debts.RUB) + "  $" + Format(state.Debts.USD) +
                          "  €" + Format(state.Debts.EUR);
+            _debt.color = ClientConfig.DownColor;
 
             bool canRepay = state.DebtBlocked && !IsInRaid();
             if (_repayButton != null) _repayButton.interactable = canRepay;
