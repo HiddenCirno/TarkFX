@@ -6,7 +6,7 @@
   "maxImpactLog": 0.15,
   "marketImpactExponent": 0.5,
   "dailyLimitPercent": 0.30,
-  "debugMode": true,
+  "debugMode": false,
   "sellStepShares": 10,
   "maxHoldingShares": 100000,
   "lenderPercent": 0.30,
