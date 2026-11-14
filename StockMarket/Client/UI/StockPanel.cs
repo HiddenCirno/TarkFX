@@ -49,6 +49,8 @@ namespace TarkFX.StockMarket.Client.UI
         private TMP_Text _margin;
         private TMP_Text _equity;
         private TMP_Text _liq;
+        private TMP_Text _pnl;
+        private TMP_Text _dividend;
         private KLineGraphic _chart;
 
         private readonly Button[] _leverageButtons = new Button[8];
@@ -310,13 +312,19 @@ namespace TarkFX.StockMarket.Client.UI
             _margin = CreateTopLabel(side.transform, "Margin", 400f, 26f, 16f, TextAlignmentOptions.MidlineLeft);
             _equity = CreateTopLabel(side.transform, "Equity", 426f, 26f, 16f, TextAlignmentOptions.MidlineLeft);
             _liq = CreateTopLabel(side.transform, "Liquidation", 452f, 26f, 16f, TextAlignmentOptions.MidlineLeft);
-            _debt = CreateTopLabel(side.transform, "Debt", 480f, 24f, 15f, TextAlignmentOptions.MidlineLeft);
+            _pnl = CreateTopLabel(side.transform, "Pnl", 480f, 24f, 15f, TextAlignmentOptions.MidlineLeft);
+            _dividend = CreateTopLabel(side.transform, "Dividend", 506f, 24f, 15f, TextAlignmentOptions.MidlineLeft);
+            _debt = CreateTopLabel(side.transform, "Debt", 532f, 24f, 15f, TextAlignmentOptions.MidlineLeft);
             // 欠债 = 亏损，用"下跌色"，跟随红涨绿跌/绿涨红跌设置
             _debt.color = ClientConfig.DownColor;
 
-            BuildRepayRow(side.transform, 506f, 36f);
+            // 盈亏/分红两行各自用富文本着色，所以标签本身保持中性色
+            _pnl.richText = true;
+            _dividend.richText = true;
 
-            _balance = CreateTopLabel(side.transform, "Balance", 550f, 26f, 17f, TextAlignmentOptions.MidlineLeft);
+            BuildRepayRow(side.transform, 558f, 36f);
+
+            _balance = CreateTopLabel(side.transform, "Balance", 602f, 26f, 17f, TextAlignmentOptions.MidlineLeft);
 
             UpdateDirectionButtons();
             UpdateLeverageButtons();
@@ -752,6 +760,31 @@ namespace TarkFX.StockMarket.Client.UI
                             : _unlock.text + "   " + lockText;
                     }
                 }
+            }
+
+            // ── 盈亏：只展示账面（浮动）与变现（立刻平仓的净额），不展示已实现/总盈亏 ──
+            if (holding == null)
+            {
+                _pnl.text = "stockmarket/ui/pnl".Localized() + ": -";
+                _dividend.text = "stockmarket/ui/dividend-expected".Localized() + ": -";
+            }
+            else
+            {
+                _pnl.text = "stockmarket/ui/pnl".Localized() + ": " +
+                            "stockmarket/ui/pnl-book".Localized() + " " +
+                            Colored(SignedMoney(holding.UnrealizedPnl),
+                                    PnlColor(holding.UnrealizedPnl)) +
+                            "  " +
+                            "stockmarket/ui/pnl-liquid".Localized() + " " +
+                            Colored(SignedMoney(holding.LiquidationPnl),
+                                    PnlColor(holding.LiquidationPnl));
+
+                // 分红单列一行；预计分红属于收益，用"上涨色"
+                _dividend.text = "stockmarket/ui/dividend-expected".Localized() + ": " +
+                                 Colored(SignedMoney(holding.ExpectedDividend),
+                                         holding.ExpectedDividend > 0m
+                                             ? ClientConfig.UpColor
+                                             : NeutralColor);
             }
 
             _balance.text =
@@ -1460,6 +1493,26 @@ namespace TarkFX.StockMarket.Client.UI
             Math.Abs(value) >= 1000m
                 ? value.ToString("N0", CultureInfo.InvariantCulture)
                 : value.ToString("0.00", CultureInfo.InvariantCulture);
+
+        /// <summary>带符号的金额，例如 +₽12,300 / -₽450 / ₽0。</summary>
+        private string SignedMoney(decimal value)
+        {
+            if (value == 0m)
+                return _currentSymbol + "0";
+
+            return (value > 0m ? "+" : "-") + _currentSymbol + FormatPrice(Math.Abs(value));
+        }
+
+        /// <summary>盈利用上涨色、亏损用下跌色，0 用中性色（跟随红涨绿跌/绿涨红跌设置）。</summary>
+        private static Color PnlColor(decimal value) =>
+            value > 0m ? ClientConfig.UpColor :
+            value < 0m ? ClientConfig.DownColor : NeutralColor;
+
+        private static readonly Color NeutralColor = new Color(0.82f, 0.82f, 0.76f, 1f);
+
+        /// <summary>TextMeshPro 富文本着色，用于一行里分别给账面/变现上色。</summary>
+        private static string Colored(string text, Color color) =>
+            "<color=#" + ColorUtility.ToHtmlStringRGB(color) + ">" + text + "</color>";
 
         private static string Format(long value) =>
             value.ToString("N0", CultureInfo.InvariantCulture);

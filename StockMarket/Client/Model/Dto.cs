@@ -66,6 +66,10 @@ namespace TarkFX.StockMarket.Client.Model
         public decimal ShortEquity { get; set; }
         public decimal ShortLiquidationPrice { get; set; }
         public double ShortUnlockIn { get; set; }
+
+        public decimal UnrealizedPnl { get; set; }
+        public decimal LiquidationPnl { get; set; }
+        public decimal ExpectedDividend { get; set; }
     }
 
     internal sealed class BalancesDto

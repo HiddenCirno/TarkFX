@@ -477,27 +477,9 @@ public sealed class MarketStore
                 // 兜底：任何历史遗留价格都先夹回当日区间
                 basePrice = Math.Clamp(basePrice, lower, upper);
 
-                int step = stepShares > 0 ? Math.Min(stepShares, shares) : shares;
-                int sold = 0;
-                int remaining = shares;
+                gross = ComputeSellGross(def, basePrice, shares, stepShares, lower, upper);
 
-                while (remaining > 0)
-                {
-                    int chunk = Math.Min(step, remaining);
-
-                    decimal priceBefore = ImpactedSellPrice(
-                        def, basePrice, sold, lower, upper);
-                    decimal priceAfter = ImpactedSellPrice(
-                        def, basePrice, sold + chunk, lower, upper);
-
-                    // 梯形法：这一批的平均成交价
-                    gross += (priceBefore + priceAfter) * 0.5m * chunk;
-
-                    sold += chunk;
-                    remaining -= chunk;
-                }
-
-                decimal finalPrice = ImpactedSellPrice(def, basePrice, sold, lower, upper);
+                decimal finalPrice = ImpactedSellPrice(def, basePrice, shares, lower, upper);
                 runtime.LastClose = finalPrice;
                 UpdateLastCandle(runtime, finalPrice);
                 MaybeUpdateCircuitBreaker(def, runtime, tick, lower, upper);
@@ -510,6 +492,65 @@ public sealed class MarketStore
                 $"首价 {basePrice:F2} → 末价 {runtime.LastClose:F2}，总额 {gross:F2}");
 
             return new FillResult(gross, basePrice, runtime.LastClose);
+        }
+    }
+
+    /// <summary>
+    /// 分批卖出的总成交额（纯算术，不落盘、不改行情）。
+    /// 真实成交与"变现盈亏"预览共用这一段，保证两者完全一致。
+    /// </summary>
+    private decimal ComputeSellGross(
+        StockDefinition def, decimal basePrice, int shares, int stepShares,
+        decimal lower, decimal upper)
+    {
+        int step = stepShares > 0 ? Math.Min(stepShares, shares) : shares;
+        int sold = 0;
+        int remaining = shares;
+        decimal gross = 0m;
+
+        while (remaining > 0)
+        {
+            int chunk = Math.Min(step, remaining);
+
+            decimal priceBefore = ImpactedSellPrice(def, basePrice, sold, lower, upper);
+            decimal priceAfter = ImpactedSellPrice(def, basePrice, sold + chunk, lower, upper);
+
+            // 梯形法：这一批的平均成交价
+            gross += (priceBefore + priceAfter) * 0.5m * chunk;
+
+            sold += chunk;
+            remaining -= chunk;
+        }
+
+        return gross;
+    }
+
+    /// <summary>
+    /// 只算钱、不改行情：按与 <see cref="SellWithImpact"/> 完全相同的方式试算卖出总额。
+    /// 供 UI 展示"变现盈亏"使用。
+    /// </summary>
+    public decimal PreviewSellGross(string stockId, int shares, int stepShares)
+    {
+        if (shares <= 0)
+            return 0m;
+
+        lock (_sync)
+        {
+            if (!_byId.TryGetValue(stockId, out StockDefinition? def))
+                return 0m;
+            if (!_file.Stocks.TryGetValue(stockId, out StockRuntime? runtime))
+                return 0m;
+
+            decimal basePrice = runtime.LastClose;
+
+            if (!(_config.MarketImpactCoefficient > 0 && _config.MaxImpactLog > 0))
+                return basePrice * shares;
+
+            long tick = _clock.TickIndexNow();
+            (decimal lower, decimal upper) = DailyBand(runtime, tick);
+            basePrice = Math.Clamp(basePrice, lower, upper);
+
+            return ComputeSellGross(def, basePrice, shares, stepShares, lower, upper);
         }
     }
 
@@ -601,24 +642,7 @@ public sealed class MarketStore
         }
         else
         {
-            int step = stepShares > 0 ? Math.Min(stepShares, shares) : shares;
-            int bought = 0;
-            int remaining = shares;
-            gross = 0m;
-
-            while (remaining > 0)
-            {
-                int chunk = Math.Min(step, remaining);
-
-                decimal priceBefore = ImpactedBuyPrice(def, basePrice, bought, lower, upper);
-                decimal priceAfter = ImpactedBuyPrice(def, basePrice, bought + chunk, lower, upper);
-
-                // 梯形法：这一批的平均成交价
-                gross += (priceBefore + priceAfter) * 0.5m * chunk;
-
-                bought += chunk;
-                remaining -= chunk;
-            }
+            gross = ComputeBuyGross(def, basePrice, shares, stepShares, lower, upper);
         }
 
         long roundedGross = (long)Math.Round(gross, MidpointRounding.AwayFromZero);
@@ -637,6 +661,62 @@ public sealed class MarketStore
         }
 
         return new FillResult(gross, basePrice, runtime.LastClose);
+    }
+
+    /// <summary>分批买入的总成交额（纯算术，不落盘、不改行情）。</summary>
+    private decimal ComputeBuyGross(
+        StockDefinition def, decimal basePrice, int shares, int stepShares,
+        decimal lower, decimal upper)
+    {
+        int step = stepShares > 0 ? Math.Min(stepShares, shares) : shares;
+        int bought = 0;
+        int remaining = shares;
+        decimal gross = 0m;
+
+        while (remaining > 0)
+        {
+            int chunk = Math.Min(step, remaining);
+
+            decimal priceBefore = ImpactedBuyPrice(def, basePrice, bought, lower, upper);
+            decimal priceAfter = ImpactedBuyPrice(def, basePrice, bought + chunk, lower, upper);
+
+            // 梯形法：这一批的平均成交价
+            gross += (priceBefore + priceAfter) * 0.5m * chunk;
+
+            bought += chunk;
+            remaining -= chunk;
+        }
+
+        return gross;
+    }
+
+    /// <summary>
+    /// 只算钱、不改行情：按与 <see cref="CoverWithImpact"/> 完全相同的方式试算买入（平空）总额。
+    /// 上限在试算时不产生状态变化。供 UI 展示"变现盈亏"使用。
+    /// </summary>
+    public decimal PreviewCoverGross(string stockId, int shares, int stepShares)
+    {
+        if (shares <= 0)
+            return 0m;
+
+        lock (_sync)
+        {
+            if (!_byId.TryGetValue(stockId, out StockDefinition? def))
+                return 0m;
+            if (!_file.Stocks.TryGetValue(stockId, out StockRuntime? runtime))
+                return 0m;
+
+            decimal basePrice = runtime.LastClose;
+
+            if (!(_config.MarketImpactCoefficient > 0 && _config.MaxImpactLog > 0))
+                return basePrice * shares;
+
+            long tick = _clock.TickIndexNow();
+            (decimal lower, decimal upper) = DailyBand(runtime, tick);
+            basePrice = Math.Clamp(basePrice, lower, upper);
+
+            return ComputeBuyGross(def, basePrice, shares, stepShares, lower, upper);
+        }
     }
 
     /// <summary>累计买入 q 股后的价格（含涨跌停夹取）。</summary>

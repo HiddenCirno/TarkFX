@@ -92,6 +92,14 @@ public sealed class HoldingDto
     [JsonPropertyName("shortLiquidationPrice")] public decimal ShortLiquidationPrice { get; set; }
     /// <summary>空头 T+1 解锁还剩多少塔科夫秒；0 = 已可平仓</summary>
     [JsonPropertyName("shortUnlockIn")] public double ShortUnlockIn { get; set; }
+
+    // ───── 盈亏（不含已实现，也不含总盈亏） ─────
+    /// <summary>账面盈亏：按现价计算的浮动盈亏。</summary>
+    [JsonPropertyName("unrealizedPnl")] public decimal UnrealizedPnl { get; set; }
+    /// <summary>变现盈亏：按当前冲击曲线立刻平仓后的净盈亏（卖出含手续费）。</summary>
+    [JsonPropertyName("liquidationPnl")] public decimal LiquidationPnl { get; set; }
+    /// <summary>预计分红：按现价计算的下一周期现货分红（欠债冻结期间为 0）。</summary>
+    [JsonPropertyName("expectedDividend")] public decimal ExpectedDividend { get; set; }
 }
 
 public sealed class BalancesDto

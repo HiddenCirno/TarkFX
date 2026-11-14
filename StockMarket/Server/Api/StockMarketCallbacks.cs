@@ -44,6 +44,7 @@ public sealed class StockMarketCallbacks(
         };
 
         Dictionary<string, decimal> debts = portfolios.GetDebts(profileId);
+        bool debtBlocked = debts.Count > 0;
         BalancesDto debtDto = new()
         {
             Rub = ToLong(debts, "RUB"),
@@ -120,6 +121,53 @@ public sealed class StockMarketCallbacks(
                     portfolios.EffectiveTPlusOneSeconds -
                     (nowSeconds - shortPosition.OpenedMarketSeconds));
 
+            // ── 盈亏（只展示账面与变现，不展示已实现/总盈亏）──
+            // 账面 = 按现价的浮盈浮亏；变现 = 立刻按冲击曲线平掉能拿回的净额。
+            decimal unrealizedPnl = 0m;
+            decimal liquidationPnl = 0m;
+
+            if (shares > 0)
+            {
+                decimal cost = avgCost * shares;
+                unrealizedPnl += quote.Price * shares - cost;
+
+                decimal sellGross = market.PreviewSellGross(
+                    def.Id, shares, config.SellStepShares);
+                long roundedGross = RoundMoney(sellGross);
+                long fee = RoundMoney(roundedGross * config.FeeRate);
+                liquidationPnl += roundedGross - fee - cost;
+            }
+
+            if (leveraged is not null && leveraged.Shares > 0)
+            {
+                unrealizedPnl += leveraged.Shares * quote.Price
+                                 - leveraged.Borrowed - leveraged.Margin;
+
+                decimal sellGross = market.PreviewSellGross(
+                    def.Id, leveraged.Shares, config.SellStepShares);
+                long fee = RoundMoney(sellGross * config.FeeRate);
+                liquidationPnl += sellGross - leveraged.Borrowed - fee - leveraged.Margin;
+            }
+
+            if (shortPosition is not null && shortPosition.Shares > 0)
+            {
+                unrealizedPnl += shortPosition.Proceeds - shortPosition.Shares * quote.Price;
+
+                // 平空不收手续费
+                decimal coverGross = market.PreviewCoverGross(
+                    def.Id, shortPosition.Shares, config.SellStepShares);
+                liquidationPnl += shortPosition.Proceeds - coverGross;
+            }
+
+            // 预计分红：只按现货计，欠债冻结期间不发（与 DividendService 的门控一致）。
+            decimal expectedDividend = 0m;
+            if (shares > 0 && !debtBlocked && quote.Price > def.InitialPrice)
+            {
+                decimal perShare = Math.Min(
+                    quote.Price - def.InitialPrice, def.InitialPrice * 0.10m);
+                expectedDividend = shares * perShare;
+            }
+
             holdings.Add(new HoldingDto
             {
                 StockId = def.Id,
@@ -142,7 +190,10 @@ public sealed class StockMarketCallbacks(
                 ShortProceeds = shortPosition?.Proceeds ?? 0m,
                 ShortEquity = shortEquity,
                 ShortLiquidationPrice = shortLiquidation,
-                ShortUnlockIn = shortUnlockIn
+                ShortUnlockIn = shortUnlockIn,
+                UnrealizedPnl = unrealizedPnl,
+                LiquidationPnl = liquidationPnl,
+                ExpectedDividend = expectedDividend
             });
         }
 
@@ -158,7 +209,7 @@ public sealed class StockMarketCallbacks(
             Balances = balances,
             Holdings = holdings,
             Debts = debtDto,
-            DebtBlocked = debts.Count > 0
+            DebtBlocked = debtBlocked
         };
 
         return ValueTask.FromResult(httpResponseUtil.NoBody(response));
@@ -215,6 +266,9 @@ public sealed class StockMarketCallbacks(
             Tick = market.CurrentTick(MarketClock.NowUnix())
         }));
     }
+
+    private static long RoundMoney(decimal value) =>
+        (long)Math.Round(value, MidpointRounding.AwayFromZero);
 
     private static long ToLong(Dictionary<string, decimal> source, string currency)
     {
