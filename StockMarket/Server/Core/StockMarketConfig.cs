@@ -7,12 +7,11 @@ using SPTarkov.Server.Core.Helpers.Server;
 namespace TarkFX.StockMarket.Server.Core;
 
 /// <summary>
-/// config/config.json。手续费目前固定 0，但计算点已经留好
-/// （见 <see cref="TradeService"/> 的 fee 计算），以后改配置即可开启。
+/// config/config.json。卖出侧默认收取 5% 手续费（强平不计费）。
 /// </summary>
 public sealed class ModConfigFile
 {
-    public decimal FeeRate { get; set; } = 0m;
+    public decimal FeeRate { get; set; } = 0.05m;
     public long MailLifetimeSeconds { get; set; } = 604800;
     public bool EnableDevRoutes { get; set; } = false;
 
@@ -53,7 +52,7 @@ public sealed class StockMarketConfig
         ReadCommentHandling = JsonCommentHandling.Skip
     };
 
-    public decimal FeeRate { get; private set; } = 0m;
+    public decimal FeeRate { get; private set; } = 0.05m;
     public long MailLifetimeSeconds { get; private set; } = 604800;
     public bool EnableDevRoutes { get; private set; }
     public double MarketImpactCoefficient { get; private set; } = 0.02;

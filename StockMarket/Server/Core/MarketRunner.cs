@@ -20,6 +20,7 @@ namespace TarkFX.StockMarket.Server.Core;
 [Injectable(InjectionType.Singleton)]
 public sealed class MarketRunner(
     MarketStore market,
+    DividendService dividends,
     LiquidationService liquidation,
     ISptLogger<MarketRunner> logger)
 {
@@ -41,6 +42,9 @@ public sealed class MarketRunner(
         while (market.LastTick < targetTick)
         {
             market.AdvanceOneTick();
+
+            // 分红用本 tick 的收盘价判断（在强平冲击之前）
+            dividends.ProcessTick(market.LastTick);
 
             // 强平会卖出并产生冲击，必须在本 tick 结算完再进入下一根 K 线
             liquidation.CheckAll();

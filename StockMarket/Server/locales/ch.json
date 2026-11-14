@@ -33,6 +33,7 @@
   "stockmarket/result/bought": "已买入 {0} 股，成交价 {1}",
   "stockmarket/result/sold": "已卖出 {0} 股，回款 {1}，资金已通过系统邮件发送",
   "stockmarket/mail/sell": "股票卖出回款",
+  "stockmarket/mail/dividend": "股票分红",
   "stockmarket/error/internal": "内部错误",
   "stockmarket/error/market_closed": "战局内无法交易",
   "stockmarket/ui/leverage": "杠杆",

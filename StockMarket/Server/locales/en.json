@@ -33,6 +33,7 @@
   "stockmarket/result/bought": "Bought {0} shares at {1}",
   "stockmarket/result/sold": "Sold {0} shares for {1}; funds sent by system mail",
   "stockmarket/mail/sell": "Stock sale proceeds",
+  "stockmarket/mail/dividend": "Stock dividend",
   "stockmarket/error/internal": "Internal error",
   "stockmarket/error/market_closed": "Trading is unavailable in raid",
   "stockmarket/ui/leverage": "Leverage",

@@ -1,5 +1,5 @@
 {
-  "feeRate": 0.0,
+  "feeRate": 0.05,
   "mailLifetimeSeconds": 604800,
   "enableDevRoutes": false,
   "marketImpactCoefficient": 0.02,

@@ -31,6 +31,13 @@ public sealed record ShortSnapshot(
 /// <summary>转生时归还券行的股数。</summary>
 public sealed record ReleasedBorrow(string StockId, int Shares);
 
+/// <summary>分红扫描用的现货批次快照。</summary>
+public sealed record SpotLotSnapshot(
+    string ProfileId,
+    string StockId,
+    int Shares,
+    long BuyTick);
+
 /// <summary>
 /// 持仓存储（按 sessionId）。
 ///
@@ -314,6 +321,32 @@ public sealed class PortfolioStore
                         position.Value.EntryPrice,
                         position.Value.Margin,
                         position.Value.Borrowed));
+                }
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>所有玩家的现货批次快照（分红扫描用，调用时不在锁内）。</summary>
+    public List<SpotLotSnapshot> GetSpotLotsSnapshot()
+    {
+        lock (_sync)
+        {
+            var result = new List<SpotLotSnapshot>();
+
+            foreach (KeyValuePair<string, Portfolio> profile in _file.Profiles)
+            {
+                foreach (KeyValuePair<string, Position> position in profile.Value.Positions)
+                {
+                    foreach (Lot lot in position.Value.Lots)
+                    {
+                        if (lot.Shares > 0)
+                        {
+                            result.Add(new SpotLotSnapshot(
+                                profile.Key, position.Key, lot.Shares, lot.BuyTick));
+                        }
+                    }
                 }
             }
 

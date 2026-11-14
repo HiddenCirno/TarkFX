@@ -115,16 +115,16 @@ public sealed class TradeService(
 
         long available = GetBalance(pmc, template);
 
+        // 买入不收手续费（手续费只对卖出收取）
         FillResult? fill = market.BuyWithImpact(
-            stockId, shares, config.SellStepShares, available, config.FeeRate);
+            stockId, shares, config.SellStepShares, available, 0m);
 
         if (fill is null)
             return Fail("insufficient_funds", "stockmarket/error/insufficient_funds");
 
         long total = RoundCurrency(fill.Value.Gross);
-        long fee = RoundCurrency(total * config.FeeRate);
 
-        if (!TryRemoveMoney(pmc, sessionId, template, total + fee, output))
+        if (!TryRemoveMoney(pmc, sessionId, template, total, output))
             return Fail("insufficient_funds", "stockmarket/error/insufficient_funds");
 
         decimal averagePrice = shares > 0 ? fill.Value.Gross / shares : quote.Price;
@@ -293,15 +293,15 @@ public sealed class TradeService(
         FillResult fill = market.SellWithImpact(
             stockId, position.Shares, config.SellStepShares);
 
-        decimal net = fill.Gross - position.Borrowed;
+        // 平多头 = 卖出，按成交总额收手续费
+        long fee = RoundCurrency(fill.Gross * config.FeeRate);
+        decimal net = fill.Gross - position.Borrowed - fee;
         long rounded = RoundCurrency(net);
-        long fee = RoundCurrency(rounded * config.FeeRate);
-        long payout = rounded - fee;
 
         liquidation.CheckAll();
 
-        if (payout > 0)
-            SendMoneyMail(sessionId, template, payout, "stockmarket/mail/sell");
+        if (rounded > 0)
+            SendMoneyMail(sessionId, template, rounded, "stockmarket/mail/sell");
         else if (net < 0m)
             portfolios.AddDebt(profileId, quote.Definition.Currency, -net);
 
@@ -309,7 +309,7 @@ public sealed class TradeService(
 
         logger.Info(
             $"[StockMarket] {sessionId} 平 {position.Leverage}x {stockId} " +
-            $"{position.Shares} 股 @ {quote.Price}，结算 {net:F2}");
+            $"{position.Shares} 股 @ {quote.Price}，手续费 {fee}，结算 {net:F2}");
 
         decimal averagePrice = position.Shares > 0
             ? fill.Gross / position.Shares
@@ -317,7 +317,7 @@ public sealed class TradeService(
 
         return new TradeOutcome(
             true, null, "stockmarket/result/closed", averagePrice,
-            Math.Max(0, payout), position.Shares);
+            Math.Max(0, rounded), position.Shares);
     }
 
     // ══════════════════ 做空 ══════════════════
@@ -363,8 +363,10 @@ public sealed class TradeService(
 
         FillResult fill = market.SellWithImpact(stockId, shares, config.SellStepShares);
 
-        decimal proceeds = fill.Gross;
-        long margin = (long)Math.Ceiling(proceeds / leverage);
+        // 开空 = 卖出借入的股票，同样收卖出侧手续费；费用从冻结卖出款里扣
+        long fee = RoundCurrency(fill.Gross * config.FeeRate);
+        decimal proceeds = fill.Gross - fee;
+        long margin = (long)Math.Ceiling(fill.Gross / leverage);
         if (margin <= 0)
             return Fail("invalid_amount", "stockmarket/error/invalid_amount");
 
@@ -377,7 +379,7 @@ public sealed class TradeService(
             return Fail("insufficient_funds", "stockmarket/error/insufficient_funds");
         }
 
-        decimal entryPrice = shares > 0 ? proceeds / shares : quote.Price;
+        decimal entryPrice = shares > 0 ? fill.Gross / shares : quote.Price;
         long tick = market.CurrentTick(MarketClock.NowUnix());
 
         portfolios.OpenShort(
@@ -389,7 +391,7 @@ public sealed class TradeService(
 
         logger.Info(
             $"[StockMarket] {sessionId} 开空 {leverage}x {stockId} {shares} 股 " +
-            $"@ 均价 {entryPrice:F2}，保证金 {margin}，卖出款 {proceeds:F2}");
+            $"@ 均价 {entryPrice:F2}，保证金 {margin}，手续费 {fee}，冻结卖出款 {proceeds:F2}");
 
         return new TradeOutcome(
             true, null, "stockmarket/result/opened_short", entryPrice, margin, shares);
@@ -428,9 +430,8 @@ public sealed class TradeService(
 
         market.ReleaseBorrowedShares(stockId, position.Shares);
 
-        long rounded = RoundCurrency(equity);
-        long fee = RoundCurrency(rounded * config.FeeRate);
-        long payout = rounded - fee;
+        // 平空 = 买回，不收卖出侧手续费（开空时已经收过）
+        long payout = RoundCurrency(equity);
 
         liquidation.CheckAll();
 
