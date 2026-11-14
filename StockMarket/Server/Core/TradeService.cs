@@ -104,9 +104,6 @@ public sealed class TradeService(
         TradeOutcome? blocked = CheckTradable(pmc, sessionId, out string profileId);
         if (blocked is not null) return blocked;
 
-        if (portfolios.HasShort(profileId, stockId))
-            return Fail("position_conflict", "stockmarket/error/position_conflict");
-
         if (portfolios.GetTotalShares(profileId, stockId) + shares > config.MaxHoldingShares)
             return Fail("max_holding", "stockmarket/error/max_holding");
 
@@ -213,9 +210,6 @@ public sealed class TradeService(
 
         TradeOutcome? blocked = CheckTradable(pmc, sessionId, out string profileId);
         if (blocked is not null) return blocked;
-
-        if (portfolios.HasShort(profileId, stockId))
-            return Fail("position_conflict", "stockmarket/error/position_conflict");
 
         if (portfolios.HasLeveraged(profileId, stockId))
             return Fail("leveraged_exists", "stockmarket/error/leveraged_exists");
@@ -340,9 +334,6 @@ public sealed class TradeService(
 
         TradeOutcome? blocked = CheckTradable(pmc, sessionId, out string profileId);
         if (blocked is not null) return blocked;
-
-        if (portfolios.GetShares(profileId, stockId) > 0 || portfolios.HasLeveraged(profileId, stockId))
-            return Fail("position_conflict", "stockmarket/error/position_conflict");
 
         if (portfolios.HasShort(profileId, stockId))
             return Fail("short_exists", "stockmarket/error/short_exists");
