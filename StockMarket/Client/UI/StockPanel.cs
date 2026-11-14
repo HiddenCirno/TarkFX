@@ -431,6 +431,8 @@ namespace TarkFX.StockMarket.Client.UI
             UpdateTradeButtonLabels();
             UpdateAmountLabels();
             RefreshButtonStateFromState();
+            // 纯客户端视图切换：立即重绘持仓/盈亏，不等下一轮心跳
+            RefreshHoldingView();
         }
 
         private void UpdateDirectionButtons()
@@ -614,45 +616,24 @@ namespace TarkFX.StockMarket.Client.UI
             UpdateAxes();
         }
 
-        private void ApplyState(StateDto state)
+        /// <summary>
+        /// 用缓存的 state 重绘「持仓区 + 盈亏行」。
+        ///
+        /// <para>
+        /// 切换做多/做空只是客户端视图选择，不涉及服务端数据；
+        /// 所以直接调用本方法立即切换，不必等下一轮 5 秒心跳。
+        /// </para>
+        /// </summary>
+        private void RefreshHoldingView()
         {
-            if (state.Stocks.Count == 0)
-            {
-                _header.text = "stockmarket/ui/no-data".Localized();
-                _chart.Clear();
-                UpdateAxes();
+            if (_state == null)
                 return;
-            }
 
-            StockDto stock = state.Stocks.Find(s => s.Id == _selectedStock);
+            StockDto stock = _state.Stocks.Find(s => s.Id == _selectedStock);
             if (stock == null)
-            {
-                stock = state.Stocks[0];
-                _selectedStock = stock.Id;
-            }
+                return;
 
-            _header.text = stock.NameKey.Localized();
-
-            _chart.SetColors(ClientConfig.UpColor, ClientConfig.DownColor);
-            _chart.SetVisibleCount(ResolveVisibleCount());
-            _chart.SetYAxisZoom(ClientConfig.YAxisZoom.Value);
-            ApplyButtonColors();
-
-            _currentSymbol = Symbol(stock.Currency);
-            _currentCurrency = stock.Currency;
-
-            _price.text = _currentSymbol + FormatPrice(stock.Price);
-            _price.color = new Color(0.86f, 0.86f, 0.80f, 1f);
-
-            // 涨跌幅相对【昨收】（服务端计算），不是相对上一根 K 线
-            _change.text = string.Format(
-                "{0}{1}  ({2:0.00}%)",
-                stock.Change >= 0m ? "+" : "",
-                FormatPrice(stock.Change),
-                stock.ChangePct);
-            _change.color = stock.Change >= 0m ? ClientConfig.UpColor : ClientConfig.DownColor;
-
-            HoldingDto holding = state.Holdings.Find(h => h.StockId == stock.Id);
+            HoldingDto holding = _state.Holdings.Find(h => h.StockId == stock.Id);
             bool hasShort = holding != null && holding.ShortLeverage > 0;
 
             if (_isShort)
@@ -787,6 +768,70 @@ namespace TarkFX.StockMarket.Client.UI
                                              : NeutralColor);
             }
 
+            // 现价线 + 昨收参考线 + 成本线；成本线跟随当前做多/做空视图
+            decimal? costLine = null;
+            if (holding != null)
+            {
+                if (_isShort)
+                {
+                    if (holding.ShortLeverage > 0 && holding.ShortEntry > 0m)
+                        costLine = holding.ShortEntry;
+                }
+                else if (holding.Shares > 0 && holding.AvgCost > 0m)
+                {
+                    costLine = holding.AvgCost;
+                }
+                else if (holding.Leverage > 0 && holding.LeverageEntry > 0m)
+                {
+                    costLine = holding.LeverageEntry;
+                }
+            }
+
+            _chart.SetPriceLines(stock.Price, stock.PrevClose, costLine);
+            UpdateAxes();
+        }
+
+        private void ApplyState(StateDto state)
+        {
+            if (state.Stocks.Count == 0)
+            {
+                _header.text = "stockmarket/ui/no-data".Localized();
+                _chart.Clear();
+                UpdateAxes();
+                return;
+            }
+
+            StockDto stock = state.Stocks.Find(s => s.Id == _selectedStock);
+            if (stock == null)
+            {
+                stock = state.Stocks[0];
+                _selectedStock = stock.Id;
+            }
+
+            _header.text = stock.NameKey.Localized();
+
+            _chart.SetColors(ClientConfig.UpColor, ClientConfig.DownColor);
+            _chart.SetVisibleCount(ResolveVisibleCount());
+            _chart.SetYAxisZoom(ClientConfig.YAxisZoom.Value);
+            ApplyButtonColors();
+
+            _currentSymbol = Symbol(stock.Currency);
+            _currentCurrency = stock.Currency;
+
+            _price.text = _currentSymbol + FormatPrice(stock.Price);
+            _price.color = new Color(0.86f, 0.86f, 0.80f, 1f);
+
+            // 涨跌幅相对【昨收】（服务端计算），不是相对上一根 K 线
+            _change.text = string.Format(
+                "{0}{1}  ({2:0.00}%)",
+                stock.Change >= 0m ? "+" : "",
+                FormatPrice(stock.Change),
+                stock.ChangePct);
+            _change.color = stock.Change >= 0m ? ClientConfig.UpColor : ClientConfig.DownColor;
+
+            HoldingDto holding = state.Holdings.Find(h => h.StockId == stock.Id);
+            RefreshHoldingView();
+
             _balance.text =
                 "stockmarket/ui/balance".Localized() + ": " +
                 _currentSymbol + Format(state.Balances.RUB) + "  $" + Format(state.Balances.USD) +
@@ -831,23 +876,7 @@ namespace TarkFX.StockMarket.Client.UI
                 _statusIsMarketState = false;
             }
 
-            // 现价线 + 昨收参考线 + 成本线。
-            // 现货为空时 GetHolding 会返回 0 成本，绝不能把 0 塞进 Y 轴范围
-            // （会把整张图压成一条平线）。杠杆仓改用开仓价作为成本线。
-            decimal? costLine = null;
-            if (holding != null)
-            {
-                if (holding.Shares > 0 && holding.AvgCost > 0m)
-                    costLine = holding.AvgCost;
-                else if (holding.Leverage > 0 && holding.LeverageEntry > 0m)
-                    costLine = holding.LeverageEntry;
-                else if (holding.ShortLeverage > 0 && holding.ShortEntry > 0m)
-                    costLine = holding.ShortEntry;
-            }
-
-            _chart.SetPriceLines(stock.Price, stock.PrevClose, costLine);
-            UpdateAxes();
-
+            // 成本线已由 RefreshHoldingView 按当前方向重绘
             UpdateButtonState(stock, holding);
         }
 
