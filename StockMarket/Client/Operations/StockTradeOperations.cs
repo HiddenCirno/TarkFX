@@ -5,6 +5,7 @@ using EFT;
 using EFT.InventoryLogic;
 using EFT.InventoryLogic.Operations;
 using Newtonsoft.Json;
+using AbstractOperation = EFT.InventoryLogic.Operations.AbstractOperation;
 
 namespace TarkFX.StockMarket.Client.Operations
 {

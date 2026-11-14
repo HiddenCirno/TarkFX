@@ -30,6 +30,11 @@ public sealed class StockMarketRouter : StaticRouter
                 async (url, request, sessionId, output, ct) =>
                     await callbacks.GetCandles(request, sessionId)),
 
+            new RouteAction<EmptyRequestData>(
+                "/stock-market/reset",
+                async (url, request, sessionId, output, ct) =>
+                    await callbacks.Reset(sessionId)),
+
             new RouteAction<DevAdvanceRequest>(
                 "/stock-market/dev/advance",
                 async (url, request, sessionId, output, ct) =>

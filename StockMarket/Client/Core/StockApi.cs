@@ -39,5 +39,9 @@ namespace TarkFX.StockMarket.Client.Core
 
         internal static Task<JObject> GetCandlesAsync(string stockId, int count = 200) =>
             PostAsync("/stock-market/candles", new { stockId, count });
+
+        /// <summary>创建角色/转生后清空当前存档的股市记录。</summary>
+        internal static Task<JObject> ResetAsync() =>
+            PostAsync("/stock-market/reset", new { });
     }
 }

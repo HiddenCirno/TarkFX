@@ -175,6 +175,25 @@ public sealed class StockMarketCallbacks(
         }));
     }
 
+    /// <summary>
+    /// 清空当前 session 的股市记录（债务/现货/杠杆/空头，归还券源）。
+    /// 由客户端在「创建角色 → 主菜单」时调用，作为 Wipe/转生的客户端侧保险。
+    /// </summary>
+    public ValueTask<string> Reset(MongoId sessionId)
+    {
+        string profileId = sessionId.ToString();
+        List<ReleasedBorrow> released = portfolios.ResetProfile(profileId);
+
+        foreach (ReleasedBorrow borrow in released)
+            market.ReleaseBorrowedShares(borrow.StockId, borrow.Shares);
+
+        return ValueTask.FromResult(httpResponseUtil.NoBody(new SimpleResponse
+        {
+            Success = true,
+            Tick = market.CurrentTick(MarketClock.NowUnix())
+        }));
+    }
+
     /// <summary>调试：快进 N 个 tick。仅在 config.json 里开启后可用。</summary>
     public ValueTask<string> DevAdvance(DevAdvanceRequest request, MongoId sessionId)
     {

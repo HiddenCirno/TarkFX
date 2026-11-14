@@ -684,7 +684,16 @@ StockMarket/
 三种入口都调用 `PortfolioStore.ResetProfile`：清空债务/现货/杠杆/空头，
 归还券源，**不产生行情冲击、不发邮件**。
 
-### 11.9 客户端配色
+### 11.9 客户端重置路由（Wipe / 转生保险）
+
+- 新增 `POST /stock-market/reset`：清空当前 session 的债务/现货/杠杆/空头，归还券源。
+- 客户端 hook：
+  - `ClientBackendSession.CreateProfile` 成功完成 → 置 pending 标记；
+  - `MainMenuShowOperation.TryOpenMainMenu` / `ShowMenuScreenSync` → 调用 reset 路由。
+- 普通登录不经过 `CreateProfile`，不会误清；
+- 服务端侧的 Wipe/删档/转生补丁仍然保留（覆盖"删档后新 id"的情况）。
+
+### 11.10 客户端配色
 
 - 涨跌幅文字、买入/卖出按钮底色跟随 `RedUpGreenDown` 配置；
 - **欠债**使用"下跌色" `ClientConfig.DownColor`：A 股模式（红涨绿跌）为绿色，
