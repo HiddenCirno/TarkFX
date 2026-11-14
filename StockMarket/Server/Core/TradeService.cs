@@ -81,7 +81,7 @@ public sealed class TradeService(
         ItemEventRouterResponse output)
     {
         if (leverage > 1)
-            return await CloseLeveragedAsync(pmc, sessionId, stockId, output);
+            return await CloseLeveragedAsync(pmc, sessionId, stockId, shares, output);
 
         return await SpotSellAsync(pmc, sessionId, stockId, shares, output);
     }
@@ -259,8 +259,12 @@ public sealed class TradeService(
     }
 
     private async Task<TradeOutcome> CloseLeveragedAsync(
-        PmcData pmc, MongoId sessionId, string stockId, ItemEventRouterResponse output)
+        PmcData pmc, MongoId sessionId, string stockId, int shares,
+        ItemEventRouterResponse output)
     {
+        if (shares <= 0)
+            return Fail("invalid_amount", "stockmarket/error/invalid_amount");
+
         StockQuote? quote = market.GetQuote(stockId);
         if (quote is null)
             return Fail("unknown_stock", "stockmarket/error/unknown_stock");
@@ -274,6 +278,9 @@ public sealed class TradeService(
         if (position is null)
             return Fail("no_leveraged_position", "stockmarket/error/no_leveraged_position");
 
+        if (shares > position.Shares)
+            return Fail("close_exceeds", "stockmarket/error/close_exceeds");
+
         if (!CurrencyTemplates.TryGetValue(quote.Definition.Currency, out MongoId template))
             return Fail("unknown_currency", "stockmarket/error/unknown_currency");
 
@@ -281,21 +288,29 @@ public sealed class TradeService(
         if (now - position.OpenedMarketSeconds < portfolios.EffectiveTPlusOneSeconds)
             return Fail("t_plus_one", "stockmarket/error/t_plus_one");
 
-        if (!portfolios.RemoveLeveraged(profileId, stockId))
+        bool fullClose = shares == position.Shares;
+        decimal ratio = (decimal)shares / position.Shares;
+        decimal borrowedPart = fullClose ? position.Borrowed : position.Borrowed * ratio;
+        decimal marginPart = fullClose ? position.Margin : position.Margin * ratio;
+
+        bool updated = fullClose
+            ? portfolios.RemoveLeveraged(profileId, stockId)
+            : portfolios.ReduceLeveraged(profileId, stockId, shares, marginPart, borrowedPart);
+
+        if (!updated)
             return Fail("no_leveraged_position", "stockmarket/error/no_leveraged_position");
 
-        FillResult fill = market.SellWithImpact(
-            stockId, position.Shares, config.SellStepShares);
+        FillResult fill = market.SellWithImpact(stockId, shares, config.SellStepShares);
 
-        // 平多头 = 卖出，按成交总额收手续费
+        // 平多头 = 卖出，按成交总额收手续费；只结算本次卖出的那部分借入额
         long fee = RoundCurrency(fill.Gross * config.FeeRate);
-        decimal net = fill.Gross - position.Borrowed - fee;
+        decimal net = fill.Gross - borrowedPart - fee;
         long rounded = RoundCurrency(net);
 
         liquidation.CheckAll();
 
         if (rounded > 0)
-            SendMoneyMail(sessionId, template, rounded, "stockmarket/mail/sell");
+            SendMoneyMail(sessionId, template, rounded, "stockmarket/mail/close_long");
         else if (net < 0m)
             portfolios.AddDebt(profileId, quote.Definition.Currency, -net);
 
@@ -303,15 +318,15 @@ public sealed class TradeService(
 
         logger.Info(
             $"[StockMarket] {sessionId} 平 {position.Leverage}x {stockId} " +
-            $"{position.Shares} 股 @ {quote.Price}，手续费 {fee}，结算 {net:F2}");
+            $"{shares}/{position.Shares} 股 @ {quote.Price}，手续费 {fee}，结算 {net:F2}");
 
-        decimal averagePrice = position.Shares > 0
-            ? fill.Gross / position.Shares
+        decimal averagePrice = shares > 0
+            ? fill.Gross / shares
             : quote.Price;
 
         return new TradeOutcome(
             true, null, "stockmarket/result/closed", averagePrice,
-            Math.Max(0, rounded), position.Shares);
+            Math.Max(0, rounded), shares);
     }
 
     // ══════════════════ 做空 ══════════════════
@@ -389,8 +404,12 @@ public sealed class TradeService(
     }
 
     public async Task<TradeOutcome> CloseShortAsync(
-        PmcData pmc, MongoId sessionId, string stockId, ItemEventRouterResponse output)
+        PmcData pmc, MongoId sessionId, string stockId, int shares,
+        ItemEventRouterResponse output)
     {
+        if (shares <= 0)
+            return Fail("invalid_amount", "stockmarket/error/invalid_amount");
+
         StockQuote? quote = market.GetQuote(stockId);
         if (quote is null)
             return Fail("unknown_stock", "stockmarket/error/unknown_stock");
@@ -404,6 +423,9 @@ public sealed class TradeService(
         if (position is null)
             return Fail("no_short_position", "stockmarket/error/no_short_position");
 
+        if (shares > position.Shares)
+            return Fail("close_exceeds", "stockmarket/error/close_exceeds");
+
         if (!CurrencyTemplates.TryGetValue(quote.Definition.Currency, out MongoId template))
             return Fail("unknown_currency", "stockmarket/error/unknown_currency");
 
@@ -411,15 +433,24 @@ public sealed class TradeService(
         if (now - position.OpenedMarketSeconds < portfolios.EffectiveTPlusOneSeconds)
             return Fail("t_plus_one", "stockmarket/error/t_plus_one");
 
+        bool fullClose = shares == position.Shares;
+        decimal ratio = (decimal)shares / position.Shares;
+        decimal marginPart = fullClose ? position.Margin : position.Margin * ratio;
+        decimal proceedsPart = fullClose ? position.Proceeds : position.Proceeds * ratio;
+
         FillResult fill = market.CoverWithImpact(
-            stockId, position.Shares, config.SellStepShares);
+            stockId, shares, config.SellStepShares);
 
-        decimal equity = position.Margin + position.Proceeds - fill.Gross;
+        decimal equity = marginPart + proceedsPart - fill.Gross;
 
-        if (!portfolios.RemoveShort(profileId, stockId))
+        bool updated = fullClose
+            ? portfolios.RemoveShort(profileId, stockId)
+            : portfolios.ReduceShort(profileId, stockId, shares, marginPart, proceedsPart);
+
+        if (!updated)
             return Fail("no_short_position", "stockmarket/error/no_short_position");
 
-        market.ReleaseBorrowedShares(stockId, position.Shares);
+        market.ReleaseBorrowedShares(stockId, shares);
 
         // 平空 = 买回，不收卖出侧手续费（开空时已经收过）
         long payout = RoundCurrency(equity);
@@ -427,7 +458,7 @@ public sealed class TradeService(
         liquidation.CheckAll();
 
         if (payout > 0)
-            SendMoneyMail(sessionId, template, payout, "stockmarket/mail/sell");
+            SendMoneyMail(sessionId, template, payout, "stockmarket/mail/close_short");
         else if (equity < 0m)
             portfolios.AddDebt(profileId, quote.Definition.Currency, -equity);
 
@@ -435,15 +466,15 @@ public sealed class TradeService(
 
         logger.Info(
             $"[StockMarket] {sessionId} 平空 {position.Leverage}x {stockId} " +
-            $"{position.Shares} 股 @ {quote.Price}，结算 {equity:F2}");
+            $"{shares}/{position.Shares} 股 @ {quote.Price}，结算 {equity:F2}");
 
-        decimal averagePrice = position.Shares > 0
-            ? fill.Gross / position.Shares
+        decimal averagePrice = shares > 0
+            ? fill.Gross / shares
             : quote.Price;
 
         return new TradeOutcome(
             true, null, "stockmarket/result/closed_short", averagePrice,
-            Math.Max(0, payout), position.Shares);
+            Math.Max(0, payout), shares);
     }
 
     // ══════════════════ 还款 ══════════════════

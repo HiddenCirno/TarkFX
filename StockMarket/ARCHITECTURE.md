@@ -341,12 +341,18 @@ newClose = clamp(round(lastClose × exp(deltaLog)))
   - 保证金 `margin = ceil(shares × price / leverage)`
   - 借入 `borrowed = shares × price − margin`
   - 从背包扣除 `margin`；权益 `equity = shares × price − borrowed`；**equity ≤ 0 强平**。
+  - **主动平仓同样支持按数量分批**：按比例拆 `margin` / `borrowed`，卖出 k 股、
+    按成交额收 0.5% 手续费；剩余仓位的强平价不变。
   - 强平卖出冲击照常计入行情；卖出所得不足偿还借入额时，**差额记入欠债**。
 - 空头：借入券行的股票立即卖出，**卖出款冻结**；保证金同样从现金扣。
   - `margin = ceil(proceeds / leverage)`，`proceeds` = 分批卖出总额。
   - 权益 `equity = margin + proceeds − shares × 现价`；**equity ≤ 0 强平**。
   - 强平价 = `(margin + proceeds) / shares`，等价于 `入场价 × (1 + 1/L)`。
   - 强平/主动平仓都按市价分批买回（向上冲击）；结算不足部分**记欠债**。
+  - **主动平仓可按数量分批**：按 `k / 总股数` 比例拆出本次的 `margin` 与 `proceeds`，
+    只买回 k 股、只归还 k 股券源；剩余仓位的开仓价、T+1 时间、强平价都不变。
+  - 平仓到账 = `本次保证金 + 本次冻结卖出款 − 买回总额`，其中大部分是退还的本金；
+    真正的盈亏是 `冻结卖出款 − 买回总额`（UI「账面」行）。
 - **个人持股上限 100,000 股**：现货 + 杠杆多 + **空头**合计不得超过。
 - 同一股票**允许多空同时持有**（对冲）；每支股票最多一笔杠杆多、一笔空头。
   - 上限按**毛持仓**计算：现货 + 杠杆多 + 空头 合计不得超过 100,000 股。
@@ -622,8 +628,9 @@ StockMarket/
 
 1. **开空**：校验券源/上限/欠债 → 分批卖出（向下冲击）→
    占用券源 → 用 `InventoryHelper` 扣保证金 → 写 Shorts。
-2. **平空**：T+1 校验 → `CoverWithImpact` 分批买回（向上冲击）→
-   结算 `margin + proceeds − cover`，正数邮件、负数记欠债 → 归还券源。
+2. **平空**：T+1 校验 → 校验 `1 ≤ k ≤ 持仓` → 按比例拆 `margin/proceeds` →
+   `CoverWithImpact` 只买回 k 股（向上冲击）→ 结算本次部分，正数邮件、负数记欠债 →
+   归还 k 股券源；剩余仓位保留，减到 0 才删除。
 3. **强平**：每 tick / 每次 state / 每次交易后扫描；多头先、空头后；
    熔断中的股票跳过；负权益记欠债；并发系统邮件。
 4. **还款**：`TarkFXStockRepay` → 扣现金 → 减少欠债；清零后解除封锁。

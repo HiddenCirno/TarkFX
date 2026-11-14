@@ -57,7 +57,7 @@ public sealed class StockMarketItemEventService(
                     pmc, sessionId, body.StockId, body.Shares, body.Leverage, output),
 
                 "close_short" => await tradeService.CloseShortAsync(
-                    pmc, sessionId, body.StockId, output),
+                    pmc, sessionId, body.StockId, body.Shares, output),
 
                 _ => Fail("invalid_op", "stockmarket/error/invalid_op")
             };

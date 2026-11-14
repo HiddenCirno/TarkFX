@@ -302,6 +302,34 @@ public sealed class PortfolioStore
         }
     }
 
+    /// <summary>
+    /// 按比例减持杠杆多仓（部分平仓）。调用方负责算好本次对应的
+    /// margin / borrowed 份额；剩余股数为 0 时应改用 <see cref="RemoveLeveraged"/>。
+    /// </summary>
+    public bool ReduceLeveraged(
+        string profileId, string stockId, int shares,
+        decimal marginPart, decimal borrowedPart)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return false;
+
+            if (!portfolio.Leveraged.TryGetValue(stockId, out LeveragedPosition? position))
+                return false;
+
+            if (shares <= 0 || shares >= position.Shares)
+                return false;
+
+            position.Shares -= shares;
+            position.Margin = Math.Max(0m, position.Margin - marginPart);
+            position.Borrowed = Math.Max(0m, position.Borrowed - borrowedPart);
+
+            SaveLocked();
+            return true;
+        }
+    }
+
     /// <summary>所有玩家的杠杆持仓快照（用于强平扫描，调用时不在锁内）。</summary>
     public List<LeveragedSnapshot> GetOpenLeveragedSnapshot()
     {
@@ -419,6 +447,34 @@ public sealed class PortfolioStore
 
             if (!portfolio.Shorts.Remove(stockId))
                 return false;
+
+            SaveLocked();
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// 按比例减持空头（部分平空）。调用方负责算好本次对应的
+    /// margin / proceeds 份额；剩余股数为 0 时应改用 <see cref="RemoveShort"/>。
+    /// </summary>
+    public bool ReduceShort(
+        string profileId, string stockId, int shares,
+        decimal marginPart, decimal proceedsPart)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return false;
+
+            if (!portfolio.Shorts.TryGetValue(stockId, out ShortPosition? position))
+                return false;
+
+            if (shares <= 0 || shares >= position.Shares)
+                return false;
+
+            position.Shares -= shares;
+            position.Margin = Math.Max(0m, position.Margin - marginPart);
+            position.Proceeds = Math.Max(0m, position.Proceeds - proceedsPart);
 
             SaveLocked();
             return true;

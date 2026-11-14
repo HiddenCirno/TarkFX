@@ -927,7 +927,9 @@ namespace TarkFX.StockMarket.Client.UI
                 if (_buy != null)
                     _buy.interactable = tradable && !hasShort && canBorrow && _amountValue > 0;
                 if (_sell != null)
-                    _sell.interactable = tradable && hasShort && holding.ShortUnlockIn <= 0;
+                    _sell.interactable = tradable && hasShort && holding.ShortUnlockIn <= 0 &&
+                                         _amountValue > 0 &&
+                                         _amountValue <= holding.ShortShares;
                 return;
             }
 
@@ -938,17 +940,20 @@ namespace TarkFX.StockMarket.Client.UI
 
             if (_leverage > 1)
             {
-                // 杠杆模式：开仓要求当前没有杠杆仓；平仓要求存在杠杆仓
+                // 杠杆模式：开仓要求当前没有杠杆仓；平仓可按数量分批
                 if (_buy != null)
-                    _buy.interactable = tradable && !hasLeverage && !hasShort && withinCap;
+                    _buy.interactable = tradable && !hasLeverage && withinCap;
                 if (_sell != null)
                     _sell.interactable = tradable && hasLeverage &&
-                                         holding.LeverageUnlockIn <= 0;
+                                         holding.LeverageUnlockIn <= 0 &&
+                                         _amountValue > 0 &&
+                                         _amountValue <= holding.LeverageShares;
                 return;
             }
 
+            // 多空可共存：已持有空头时仍允许买入现货
             if (_buy != null)
-                _buy.interactable = tradable && _amountValue > 0 && !hasShort && withinCap;
+                _buy.interactable = tradable && _amountValue > 0 && withinCap;
 
             if (_sell != null)
                 _sell.interactable = tradable && holding != null && holding.Sellable >= _amountValue;
@@ -1024,11 +1029,27 @@ namespace TarkFX.StockMarket.Client.UI
 
             string text = "stockmarket/ui/amount".Localized() + ": " + _amountValue;
 
-            // 杠杆/做空时顺带显示需要的保证金与券源
+            // 杠杆/做空时显示本次开仓的保证金；已有仓位时改为显示本次平仓数量
             if ((_leverage > 1 || _isShort) && _state != null)
             {
                 StockDto stock = _state.Stocks.Find(s => s.Id == _selectedStock);
-                if (stock != null)
+                HoldingDto holding = _state.Holdings.Find(h => h.StockId == _selectedStock);
+
+                bool closingShort = _isShort && holding != null && holding.ShortLeverage > 0;
+                bool closingLong = !_isShort && _leverage > 1 &&
+                                   holding != null && holding.Leverage > 0;
+
+                if (closingShort)
+                {
+                    text += "   " + "stockmarket/ui/close-short".Localized() + ": " +
+                            _amountValue + " / " + holding.ShortShares;
+                }
+                else if (closingLong)
+                {
+                    text += "   " + "stockmarket/ui/close-position".Localized() + ": " +
+                            _amountValue + " / " + holding.LeverageShares;
+                }
+                else if (stock != null)
                 {
                     long margin = (long)Math.Ceiling(stock.Price * _amountValue / _leverage);
                     text += "   " + "stockmarket/ui/margin".Localized() +
