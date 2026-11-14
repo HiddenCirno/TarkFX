@@ -19,16 +19,16 @@ public sealed record StockDefinition
     /// <summary>RUB / USD / EUR —— 对应 SPT 的 Money 模板</summary>
     public string Currency { get; init; } = "RUB";
 
-    public decimal InitialPrice { get; init; } = 100m;
+    public decimal InitialPrice { get; init; } = 10_000m;
 
     /// <summary>均值回归的目标价（对数空间）</summary>
-    public decimal MeanPrice { get; init; } = 100m;
+    public decimal MeanPrice { get; init; } = 10_000m;
 
-    public decimal MinPrice { get; init; } = 1m;
-    public decimal MaxPrice { get; init; } = 1_000_000m;
+    public decimal MinPrice { get; init; } = 100m;
+    public decimal MaxPrice { get; init; } = 10_000_000m;
 
     /// <summary>最小报价单位，价格最后按它取整</summary>
-    public decimal TickSize { get; init; } = 0.01m;
+    public decimal TickSize { get; init; } = 1m;
 
     /// <summary>每 tick 的基准对数收益率标准差</summary>
     public double Volatility { get; init; } = 0.006;
@@ -59,6 +59,12 @@ public sealed record StockDefinition
     public double JumpScale { get; init; } = 3.0;
 
     public long BaseVolume { get; init; } = 1000;
+
+    /// <summary>
+    /// 总股本。市值 = 现价 × TotalShares；券行持有 = TotalShares × LenderPercent。
+    /// 用 long 存，10,000,000 股 × 10,000 = 1e11 也不会溢出。
+    /// </summary>
+    public long TotalShares { get; init; } = 10_000_000;
 
     public bool Enabled { get; init; } = true;
 }
@@ -99,9 +105,24 @@ public sealed record StockRuntime
     /// <summary>停牌原因（本地化 key），仅用于展示/日志。</summary>
     public string? HaltReasonKey { get; set; }
 
+    /// <summary>券行已经借出多少股（全服合计）。平仓/强平/转生时归还。</summary>
+    public long LenderLentShares { get; set; }
+
+    /// <summary>
+    /// 涨跌停熔断：在这个 tick 之前，系统强平暂停。
+    /// 首次触及涨跌停时设置一次（边沿触发），不因持续封板而续期。
+    /// </summary>
+    public long LiquidationFrozenUntilTick { get; set; }
+
+    /// <summary>上一 tick 是否处于涨/跌停价，用于边沿触发熔断。</summary>
+    public bool WasAtLimit { get; set; }
+
     public List<Candle> Candles { get; set; } = [];
 
     public bool IsHaltedAt(long tick) => HaltedUntilTick > 0 && tick < HaltedUntilTick;
+
+    public bool IsLiquidationFrozenAt(long tick) =>
+        LiquidationFrozenUntilTick > 0 && tick < LiquidationFrozenUntilTick;
 }
 
 /// <summary>落盘的全局行情文件。</summary>
@@ -136,10 +157,71 @@ public sealed class Position
     public List<Lot> Lots { get; set; } = [];
 }
 
+/// <summary>
+/// 一笔杠杆持仓（每支股票最多一笔）。
+///
+/// <para>
+/// 经济含义：玩家用 <see cref="Margin"/> 自有资金，按 <see cref="Leverage"/> 倍
+/// 撬动 <see cref="Shares"/> 股；剩余部分是券商借出的 <see cref="Borrowed"/>。
+/// 权益 = 市值 − 借款；权益 ≤ 0 时强平（保证金亏完）。
+/// </para>
+/// </summary>
+public sealed class LeveragedPosition
+{
+    public int Leverage { get; set; }
+    public int Shares { get; set; }
+    public decimal EntryPrice { get; set; }
+
+    /// <summary>玩家自有资金（从背包里扣掉的那部分）</summary>
+    public decimal Margin { get; set; }
+
+    /// <summary>借入金额 = Shares × EntryPrice − Margin</summary>
+    public decimal Borrowed { get; set; }
+
+    public long OpenedTick { get; set; }
+    public double OpenedMarketSeconds { get; set; }
+}
+
+/// <summary>
+/// 一笔做空仓位（每支股票最多一笔）。
+///
+/// <para>
+/// 借入 <see cref="Shares"/> 股并立即卖出，卖出所得 <see cref="Proceeds"/> 冻结，
+/// 同时从玩家现金扣 <see cref="Margin"/>（= 卖出额 / 杠杆）。
+/// 权益 = Margin + Proceeds − Shares × 现价；权益 ≤ 0 时强平。
+/// </para>
+/// </summary>
+public sealed class ShortPosition
+{
+    public int Leverage { get; set; }
+    public int Shares { get; set; }
+
+    /// <summary>开空时的分批卖出均价</summary>
+    public decimal EntryPrice { get; set; }
+
+    /// <summary>卖出所得（冻结，不发给玩家）</summary>
+    public decimal Proceeds { get; set; }
+
+    /// <summary>玩家自有保证金（从现金扣掉的部分）</summary>
+    public decimal Margin { get; set; }
+
+    public long OpenedTick { get; set; }
+    public double OpenedMarketSeconds { get; set; }
+}
+
 /// <summary>单个玩家的持仓，key 是 sessionId。</summary>
 public sealed class Portfolio
 {
     public Dictionary<string, Position> Positions { get; set; } = [];
+
+    /// <summary>stockId → 杠杆持仓。旧档没有这个字段时反序列化会自动用空字典。</summary>
+    public Dictionary<string, LeveragedPosition> Leveraged { get; set; } = [];
+
+    /// <summary>stockId → 做空仓位。</summary>
+    public Dictionary<string, ShortPosition> Shorts { get; set; } = [];
+
+    /// <summary>币种（RUB/USD/EUR）→ 欠债金额。欠债未清零前封锁全部股市操作。</summary>
+    public Dictionary<string, decimal> Debts { get; set; } = [];
 }
 
 public sealed record PortfolioFile

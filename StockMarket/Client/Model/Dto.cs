@@ -12,9 +12,12 @@ namespace TarkFX.StockMarket.Client.Model
         public double MarketSeconds { get; set; }
         public double SecondsToNextTick { get; set; }
         public double TPlusOneSeconds { get; set; }
+        public int MaxHoldingShares { get; set; }
         public List<StockDto> Stocks { get; set; } = new List<StockDto>();
         public BalancesDto Balances { get; set; } = new BalancesDto();
         public List<HoldingDto> Holdings { get; set; } = new List<HoldingDto>();
+        public BalancesDto Debts { get; set; } = new BalancesDto();
+        public bool DebtBlocked { get; set; }
     }
 
     internal sealed class StockDto
@@ -27,6 +30,15 @@ namespace TarkFX.StockMarket.Client.Model
         public decimal Change { get; set; }
         public double ChangePct { get; set; }
         public bool Halted { get; set; }
+        public bool AtLimitUp { get; set; }
+        public bool AtLimitDown { get; set; }
+
+        public long TotalShares { get; set; }
+        public long MarketCap { get; set; }
+        public long LenderTotal { get; set; }
+        public long LenderAvailable { get; set; }
+        public bool CircuitBreakerActive { get; set; }
+        public long CircuitBreakerRemainingTicks { get; set; }
     }
 
     internal sealed class HoldingDto
@@ -37,6 +49,23 @@ namespace TarkFX.StockMarket.Client.Model
         public decimal AvgCost { get; set; }
         public decimal Value { get; set; }
         public double NextUnlockIn { get; set; }
+
+        public int Leverage { get; set; }
+        public int LeverageShares { get; set; }
+        public decimal LeverageMargin { get; set; }
+        public decimal LeverageEquity { get; set; }
+        public decimal LiquidationPrice { get; set; }
+        public decimal LeverageEntry { get; set; }
+        public double LeverageUnlockIn { get; set; }
+
+        public int ShortLeverage { get; set; }
+        public int ShortShares { get; set; }
+        public decimal ShortEntry { get; set; }
+        public decimal ShortMargin { get; set; }
+        public decimal ShortProceeds { get; set; }
+        public decimal ShortEquity { get; set; }
+        public decimal ShortLiquidationPrice { get; set; }
+        public double ShortUnlockIn { get; set; }
     }
 
     internal sealed class BalancesDto
@@ -61,15 +90,5 @@ namespace TarkFX.StockMarket.Client.Model
         public decimal L { get; set; }
         public decimal C { get; set; }
         public long V { get; set; }
-    }
-
-    internal sealed class TradeResultDto
-    {
-        public bool Success { get; set; }
-        public string Code { get; set; }
-        public string MessageKey { get; set; }
-        public decimal? Price { get; set; }
-        public long? Total { get; set; }
-        public int? Shares { get; set; }
     }
 }

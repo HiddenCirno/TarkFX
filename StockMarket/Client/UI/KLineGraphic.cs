@@ -39,6 +39,10 @@ namespace TarkFX.StockMarket.Client.UI
         private decimal[] _ma20 = Array.Empty<decimal>();
 
         private int _visibleCount = 120;
+
+        /// <summary>Y 轴总跨度 = 数据区间 × 该系数。1.35 ≈ 上下各留 15%</summary>
+        private decimal _yAxisZoom = 1.35m;
+
         private decimal _viewMin;
         private decimal _viewMax;
 
@@ -83,6 +87,23 @@ namespace TarkFX.StockMarket.Client.UI
             SetVerticesDirty();
         }
 
+        /// <summary>
+        /// Y 轴放宽系数：1.0 = 数据贴边铺满，1.35 = 上下各留约 15%，越大越平缓。
+        /// </summary>
+        public void SetYAxisZoom(float zoom)
+        {
+            if (float.IsNaN(zoom) || float.IsInfinity(zoom))
+                return;
+
+            decimal clamped = Math.Clamp((decimal)zoom, 1.0m, 2.5m);
+            if (clamped == _yAxisZoom)
+                return;
+
+            _yAxisZoom = clamped;
+            RecalculateRange();
+            SetVerticesDirty();
+        }
+
         public void SetColors(Color up, Color down)
         {
             if (up == UpColor && down == DownColor)
@@ -96,6 +117,11 @@ namespace TarkFX.StockMarket.Client.UI
         /// <summary>current = 现价，reference = 昨收，cost = 持仓成本。null 表示不画。</summary>
         public void SetPriceLines(decimal? current, decimal? reference, decimal? cost)
         {
+            // 0/负价格没有意义。成本价传 0 会把 Y 轴范围拉到 0，整张图被压成平线。
+            if (current.HasValue && current.Value <= 0m) current = null;
+            if (reference.HasValue && reference.Value <= 0m) reference = null;
+            if (cost.HasValue && cost.Value <= 0m) cost = null;
+
             bool changed = UpdateValue(ref _hasCurrentPrice, ref _currentPrice, current)
                          | UpdateValue(ref _hasReferencePrice, ref _referencePrice, reference)
                          | UpdateValue(ref _hasCostPrice, ref _costPrice, cost);
@@ -199,13 +225,27 @@ namespace TarkFX.StockMarket.Client.UI
                 decimal pad = max == 0m ? 1m : max * 0.01m;
                 _viewMin = min - pad;
                 _viewMax = max + pad;
+                return;
             }
-            else
+
+            // ① 最小纵向跨度：极端横盘时不要把 0.2% 的波动放大成一整屏
+            decimal mid = (min + max) * 0.5m;
+            decimal minSpan = mid * 0.02m;
+            decimal span = max - min;
+
+            if (span < minSpan)
             {
-                decimal pad = (max - min) * 0.08m;
-                _viewMin = min - pad;
-                _viewMax = max + pad;
+                decimal half = (minSpan - span) * 0.5m;
+                min -= half;
+                max += half;
+                span = minSpan;
             }
+
+            // ② 放宽系数（同时决定上下留白）：
+            //    总跨度 = 数据区间 × zoom，两侧各留 (zoom−1)/2
+            decimal extra = span * (_yAxisZoom - 1m) * 0.5m;
+            _viewMin = min - extra;
+            _viewMax = max + extra;
         }
 
         private void IncludeMovingAverages(int start, ref decimal min, ref decimal max)

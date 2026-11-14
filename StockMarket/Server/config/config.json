@@ -1,5 +1,14 @@
 {
   "feeRate": 0.0,
   "mailLifetimeSeconds": 604800,
-  "enableDevRoutes": false
+  "enableDevRoutes": false,
+  "marketImpactCoefficient": 0.02,
+  "maxImpactLog": 0.15,
+  "marketImpactExponent": 0.5,
+  "dailyLimitPercent": 0.30,
+  "debugMode": true,
+  "sellStepShares": 10,
+  "maxHoldingShares": 100000,
+  "lenderPercent": 0.30,
+  "circuitBreakerHours": 24.0
 }

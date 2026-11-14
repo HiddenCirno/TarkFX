@@ -18,7 +18,7 @@
 │        ├─ StockPanel (uGUI，手搭)                                │
 │        │    ├─ 股票列表 / 报价                                    │
 │        │    ├─ KLineGraphic : MaskableGraphic（自绘蜡烛图）        │
-│        │    └─ 下单区（买入/卖出/持仓/T+1 倒计时）                 │
+│        │    └─ 交易区上移：杠杆 1x/2x/5x/10x、数量、买入/卖出     │
 │        └─ 5s 轮询 → RequestHandler.PostJson                      │
 └──────────────────────────────────────────────────────────────────┘
                               │ HTTP (SPT 本地服务)
@@ -73,6 +73,15 @@ missed = tickIndex(now) - lastPersistedTick
   若 `missed` 超过阈值（默认 20000 ≈ 1 个月现实时间），走"跳跃模式"：
   直接从长期均值重新起算，避免无意义的长循环。
 
+**逐 tick 结算（重要）**：补算由 `MarketRunner` 驱动，每个 tick 都是：
+
+```
+生成一根 K 线 → 检查保证金 → （必要时）强平卖出 & 计算冲击 → 下一根
+```
+
+强平卖出会影响价格，所以不能"先把所有 K 线算完再检查一次"；
+离线期间发生的爆仓会真实体现在 K 线路径和下一根开盘价里。
+
 > 结论：**服务端关着的时候行情照走**。这与"2016 起跑 + 7 倍速"的设定一致。
 
 ### 1.3 与游戏内时间的关系
@@ -94,6 +103,8 @@ x[t+1] = x[t] + κ·(ln(mean) − x[t]) + μ + σ·scale(regime[t])·z + jump
 price  = exp(x)
 ```
 
+- **价格基准**：卢布股 10,000 起步、`tickSize = 1`（0.6% ≈ 60 卢布，涨跌自然以百卢布计）；
+  以后美元/欧元股用 100 起步、`tickSize = 0.01` 即可（按股票配置，引擎与币种无关）
 - `κ` 回归强度（防止价格起飞/归零）
 - `σ` 每 tick 基准波动率 **0.6%**；实际波动率乘 `QuietVolatilityScale`（0.35 → 0.21%）或 `ActiveVolatilityScale`（2.0 → 1.2%）
 - `RegimeActivateChance`（0.04）/ `RegimeCalmChance`（0.25）：活跃段较短
@@ -202,7 +213,14 @@ sealed record MarketFile {
 
 // 持仓（按 profile）
 sealed record Portfolio {
-    Dictionary<string, List<Lot>> Positions;   // stockId -> 批次
+    Dictionary<string, List<Lot>> Positions;                 // stockId -> 现货批次
+    Dictionary<string, LeveragedPosition> Leveraged;         // stockId -> 杠杆仓（最多一笔）
+}
+sealed record LeveragedPosition {
+    int Leverage; int Shares; decimal EntryPrice;
+    decimal Margin;      // 自有资金
+    decimal Borrowed;    // Shares × EntryPrice − Margin
+    long OpenedTick; double OpenedMarketSeconds;
 }
 sealed record Lot {
     int      Shares;
@@ -239,6 +257,9 @@ sealed record Lot {
   的批次可卖（FIFO 消耗）。
 - **注意**：这里的 24 小时是**塔科夫时间** → 现实约 **3.43 小时**。
   如需改成现实 24 小时，改 `PortfolioStore.TPlusOneMarketSeconds` 并同步换算。
+- **杠杆仓同样受 T+1 限制**（`OpenedMarketSeconds` 计时），否则开仓后立刻平仓就是无风险套利。
+  强平是强制行为，**绕过 T+1**。
+- **Debug 模式**（`config.json` 的 `debugMode`）下 T+1 阈值归零，现货与杠杆都立即解锁。
 
 ### 4.2 币种
 
@@ -275,12 +296,86 @@ Money.EUROS   = "569668774bdc2da2298b4568"
 - 同一 tick 内多次买卖同价（简化，无滑点）。
 - 金额取整到 `TickSize`，再乘股数；不足 1 个最小单位向上取整以保证不出现 0 元成交。
 
-### 4.4 市场开放时间
+### 4.4 交易冲击（Market Impact）
+
+大额买卖会立刻推动价格：
+
+```
+deltaLog = sign × min(ImpactCoefficient × sqrt(|shares| / BaseVolume), MaxImpactLog)
+newClose = clamp(round(lastClose × exp(deltaLog)))
+```
+
+- 平方根衰减：买 4 倍的量只产生 2 倍的冲击（流动性模型的标准近似）；
+- 默认 `MarketImpactCoefficient = 0.02`、`MaxImpactLog = 0.15`（单笔最多 ±16%）；
+- 冲击直接改 `stock_runtime.LastClose` **并同步修正当前这根 K 线**的 Close/High/Low，
+  客户端下一次轮询就能看到价格和最后一根蜡烛变化；
+- 下一根 K 线的 open 从新价格开始，冲击会延续下去（卖出时反向抵消）；
+- 生成算法本身没变，**不需要升 ModelVersion / 重置行情**。
+
+### 4.8 分批成交（滑点）
+
+买卖不再"整笔一个价"：
+
+- 冲击幅度 = `min(c · (Q/BaseVolume)^marketImpactExponent, MaxImpactLog)`，
+  `marketImpactExponent` 默认 **0.5（sqrt，凹曲线）**：抛售规模越大，边际跌幅越小，不是线性下跌；
+  调到 1.0 就变成线性；
+- 每 `sellStepShares`（默认 10）股为一批；
+- 每批用"累计成交数量对应的冲击后价格"成交，批内取梯形平均；
+- 买入越买越贵、卖出越卖越便宜，**大额交易不可能全部成交在第一口价**；
+- 整体冲击仍符合 `exp(±c·sqrt(Q/L))`，与单笔冲击的终值一致；
+- 强平同样走分批成交。
+
+实测（test 股，BaseVolume=1000，c=0.02）：
+
+| 数量 | 买入均价 | 卖出均价 | 往返滑点 |
+|---|---|---|---|
+| 10 | 100.10 | 99.90 | 0.20/股 |
+| 100 | 100.42 | 99.58 | 0.84/股 |
+| 1000 | 101.34 | 98.68 | 2.67/股 |
+| 10000 | 104.32 | 95.88 | 8.44/股 |
+
+### 4.5 杠杆 / 保证金（v2：1–100 倍）
+
+- 杠杆统一为输入框 + 快捷 1/5/10/20，范围 **1–100**。
+- 多头：**1x = 现货**（沿用 T+1）；2–100x = 杠杆多（同样受 T+1 限制，强平除外）。
+  - 保证金 `margin = ceil(shares × price / leverage)`
+  - 借入 `borrowed = shares × price − margin`
+  - 从背包扣除 `margin`；权益 `equity = shares × price − borrowed`；**equity ≤ 0 强平**。
+  - 强平卖出冲击照常计入行情；卖出所得不足偿还借入额时，**差额记入欠债**。
+- 空头：借入券行的股票立即卖出，**卖出款冻结**；保证金同样从现金扣。
+  - `margin = ceil(proceeds / leverage)`，`proceeds` = 分批卖出总额。
+  - 权益 `equity = margin + proceeds − shares × 现价`；**equity ≤ 0 强平**。
+  - 强平价 = `(margin + proceeds) / shares`，等价于 `入场价 × (1 + 1/L)`。
+  - 强平/主动平仓都按市价分批买回（向上冲击）；结算不足部分**记欠债**。
+- **个人持股上限 100,000 股**：现货 + 杠杆多 + **空头**合计不得超过。
+- 同一股票**不允许同时持多与空**；每支股票最多一笔杠杆多、一笔空头。
+- 扫描时机：每次 tick 推进后、每次交易/冲击后、每次拉取 state 时；
+  **先多后空**，最多 8 轮，处理连锁。
+
+### 4.6 涨跌停（v2：±30%）
+
+- 单日（96 tick）相对**昨收**的涨跌幅达到 **±30%**（`config.json` 的 `dailyLimitPercent`）即触发。
+- 价格引擎生成的 K 线（Close / High / Low）与交易冲击**都被夹在区间内**，
+  不会越过涨跌停价。
+- **熔断**：首次触及涨停/跌停时（边沿触发），该股票的**系统强平暂停 96 tick
+  （24 塔科夫小时）**；冻结期间玩家仍可主动平仓，到期后恢复强平。
+- 区间随交易日切换（昨收变化）自动重置。
+
+### 4.7 市场开放时间
 
 - 行情 7×24 运行（跟随塔科夫时间，无休市）。
-- 建议**只允许在非战局中交易**（`ScreenController.InRaid == false`）；
-  战局内可以看行情，但不允许下单（避免"蹲坑时单手炒股"和库存刷新问题）。
-  → 待确认。
+- **服务端 + 客户端双重拦截**：只有非战局状态允许交易/还款。
+  服务端通过 `LocationLifecycleService` 的 start/end 补丁维护 `RaidStateTracker`
+  （SPT 4.1 的 `InraidData` 已不再写入战局状态），登录时清空残留标记。
+
+### 4.8 欠债 / 券行 / 转生
+
+- 券行持有 `totalShares × 30%` 的券源；开空占用，平仓/强平/转生归还。
+- 强平或主动平仓产生的负权益记为**欠债**（按股票结算币种）。
+- 欠债未清零：**封锁全部股市操作（还款除外），持仓冻结**。
+- 还款：独立输入框 + 按钮，走 item 队列扣现金，支持部分偿还。
+- 转生：`PrestigeHelper.ProcessPendingPrestige` 后置补丁，清空债务/现货/杠杆/空头，
+  归还券源，**不产生行情冲击、不发邮件**。
 
 ---
 
@@ -288,11 +383,21 @@ Money.EUROS   = "569668774bdc2da2298b4568"
 
 | 路由 | 请求 | 响应 | 说明 |
 |---|---|---|---|
-| `/stock-market/state` | `{}` | `{ success, marketTime, tick, stocks:[{id,nameKey,currency,price,prevClose,changePct}], balances:{RUB,USD,EUR}, holdings:[{stockId,shares,sellable,avgCost,value,nextSellableIn}] }` | 轻量快照，5s 一拉 |
+| `/stock-market/state` | `{}` | `{ success, tick, marketSeconds, secondsToNextTick, tPlusOneSeconds, maxHoldingShares, stocks:[{id,nameKey,currency,price,prevClose,changePct,atLimitUp,atLimitDown,totalShares,marketCap,lenderTotal,lenderAvailable,circuitBreakerActive,circuitBreakerRemainingTicks}], balances:{RUB,USD,EUR}, holdings:[{stockId,shares,sellable,avgCost,value,nextUnlockIn,leverage...,short...}], debts:{RUB,USD,EUR}, debtBlocked }` | 轻量快照，5s 一拉 |
 | `/stock-market/candles` | `{ stockId, count? }` | `{ success, stockId, candles:[{t,o,h,l,c,v}] }` | 打开 Tab / 切股票 / 换 tick 时拉 |
-| `/stock-market/buy` | `{ stockId, shares }` | `{ success, code?, messageKey?, params?, state? }` | 服务端校验资金 |
-| `/stock-market/sell` | `{ stockId, shares }` | 同上 | 校验可卖批次，成交后发邮件 |
 | `/stock-market/dev/advance` | `{ ticks }` | `{ success, tick }` | 仅当配置 `Debug.EnableDevRoutes=true` |
+
+**交易与还款不走 HTTP 路由**，而是注册到原版 `client/game/profile/items/moving`
+的 `ItemEventRouter`（与 Move/Remove/Split 同一条异步队列）：
+
+| Action | 请求 | 说明 |
+|---|---|---|
+| `TarkFXStockTrade` | `{ stockId, shares, leverage, op }` | `op`: `buy` / `sell` / `open_long` / `close_long` / `open_short` / `close_short` |
+| `TarkFXStockRepay` | `{ currency, amount }` | 扣现金并减少欠债 |
+
+服务端通过 `InventoryHelper.RemoveItemByCount` 扣钱，自动把
+`DeletedItems/ChangedItems` 写进 `ItemEventRouterResponse.ProfileChanges`，
+客户端由原生的 `ApplyProfileChanges → ApplyStashChanges` 同步仓库。
 
 **错误码约定**：
 
@@ -364,6 +469,8 @@ Prefix(InventoryScreen __instance) => StockTab.TryAttach(__instance);
 - **Y 轴价格刻度**（右侧 5 个 `TMP_Text`）与**时间刻度**（底部首/中/末 3 个）；
 - **蓝色持仓成本虚线**；Y 轴范围 = 可视 K 线 High/Low ∪ 可视段 MA5/MA20 ∪ 成本价
   （否则滞后的 MA20 或窗口外的成本线会被画到图表外）；
+- **Y 轴放宽系数**（默认 1.35）：总跨度 = 数据区间 × 系数，两侧各留 (系数−1)/2 的空白；
+  另有 2% 最小跨度兜底，极端横盘时不会被放大成一整屏；
 - 数据更新时 `SetVerticesDirty()` + 重建轴标签。
 
 ### 6.6 客户端配置（BepInEx）
@@ -371,6 +478,13 @@ Prefix(InventoryScreen __instance) => StockTab.TryAttach(__instance);
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `可视 K 线根数 / Visible Candles` | 120 | 20~200，纯显示窗口；游戏内可用滚轮临时缩放 |
+| `Y 轴放宽系数 / Y-Axis Zoom` | 1.35 | 1.0~2.5；越大越平缓（上下留白 = (值−1)/2） |
+| `marketImpactCoefficient`（服务端 config.json） | 0.02 | 每 1 倍 BaseVolume 的对数冲击；0 = 关闭 |
+| `maxImpactLog`（服务端 config.json） | 0.15 | 单笔最大对数冲击（0.15 ≈ ±16%） |
+| `dailyLimitPercent`（服务端 config.json） | 0.15 | 单日涨跌停幅度；0 = 关闭 |
+| `marketImpactExponent`（服务端 config.json） | 0.5 | 冲击曲线指数；0.5 = sqrt（凹），1.0 = 线性 |
+| `debugMode`（服务端 config.json） | true（当前测试配置） | T+1 归零，现货与杠杆立即解锁 |
+| `sellStepShares`（服务端 config.json） | 10 | 买卖分批步进股数；0 = 整笔（仍取梯形均价） |
 | `红涨绿跌 / Red Up, Green Down` | true | 关闭即美股配色 |
 
 两项都只影响客户端渲染，不改服务端任何数据；`ApplyState()` 每 5 秒重读一次，改完最多 5 秒生效。
@@ -468,8 +582,68 @@ StockMarket/
 ## 10. 已确认口径
 
 1. **T+1** = 24 小时**塔科夫时间**（现实约 3.43 小时）。
-2. **服务端关闭期间行情继续走**，启动时按 tick 顺序补齐。
-3. **战局内可看不可交易**（客户端禁用按钮；服务端没有可靠的 in-raid 标志，暂不强制）。
+2. **服务端关闭期间行情继续走**，启动时按 tick 顺序补齐，**每 tick 检查强平**。
+3. **战局内可看不可交易**：客户端禁用按钮；服务端用 `RaidStateTracker`
+   （start/end 补丁）强制拦截。
 4. **手续费**：计算点已预留（`total × feeRate`），当前 `feeRate = 0`。
 5. **价格用小数**，成交金额 `round(单价 × 股数)`：
    19.19 × 1 → 19，19.19 × 10 → 192（和原版商店一致）。
+6. **余额**：单行显示，不拆分；卖出回款仍在邮件里，不计入可用余额。
+
+---
+
+## 11. v2 变更（做空 / 欠债 / 熔断 / item 队列）
+
+### 11.1 参数
+
+| 项 | 值 |
+|---|---|
+| 总股本 | 10,000,000（`stocks.json` 的 `totalShares`，long） |
+| 券行 | 30%（3,000,000 股，`config.lenderPercent`） |
+| 个人持股上限 | 100,000 股（现货 + 杠杆多 + 空头，`config.maxHoldingShares`） |
+| 杠杆 | 1–100（输入框 + 快捷 1/5/10/20） |
+| 做空强平线 | 权益 ≤ 0，即 `入场价 × (1 + 1/L)` |
+| 日涨跌停 | ±30% |
+| 强平熔断 | 首次触板后 96 tick（24 塔科夫小时） |
+| 冲击基准量 | 1,000（不变）；单笔冲击上限 0.15（不变） |
+| 缺口处理 | 强平/平仓的负权益记欠债，多空都记 |
+
+### 11.2 数据结构
+
+- `Portfolio.Shorts`：`stockId → ShortPosition`（Leverage / Shares / EntryPrice /
+  Proceeds / Margin / OpenedTick / OpenedMarketSeconds）
+- `Portfolio.Debts`：`币种 → 金额`
+- `StockRuntime.LenderLentShares`：全服已借出股数
+- `StockRuntime.LiquidationFrozenUntilTick` / `WasAtLimit`：熔断状态（持久化）
+
+### 11.3 关键流程
+
+1. **开空**：校验券源/上限/多空互斥/欠债 → 分批卖出（向下冲击）→
+   占用券源 → 用 `InventoryHelper` 扣保证金 → 写 Shorts。
+2. **平空**：T+1 校验 → `CoverWithImpact` 分批买回（向上冲击）→
+   结算 `margin + proceeds − cover`，正数邮件、负数记欠债 → 归还券源。
+3. **强平**：每 tick / 每次 state / 每次交易后扫描；多头先、空头后；
+   熔断中的股票跳过；负权益记欠债；并发系统邮件。
+4. **还款**：`TarkFXStockRepay` → 扣现金 → 减少欠债；清零后解除封锁。
+5. **转生**：`PrestigeHelper.ProcessPendingPrestige` 后置 →
+   `PortfolioStore.ResetProfile` → 归还券源；无冲击、无邮件。
+
+### 11.4 余额同步（重要）
+
+买入/开多/开空/还款的扣钱**不再直接改 `pmc.Inventory.Items` 后返回自定义 JSON**。
+原版所有物品变更只走 `client/game/profile/items/moving`，服务端注册：
+- `StockMarketItemEventRouter : ItemEventRouter`，action `TarkFXStockTrade` / `TarkFXStockRepay`；
+- 客户端自定义 `AbstractOperation` + `CommandWithOwners`，通过
+  `InventoryController.Execute` 入队；
+- 服务端的 `ProfileChanges` 由客户端原生 `ApplyProfileChanges → ApplyStashChanges`
+  应用到仓库 UI，余额与服务端始终一致。
+
+### 11.5 强平复盘日志
+
+- 文件：`data/liquidation.log`（append-only，UTF-8 无 BOM）。
+- 每次**系统强平**写一行：
+  `UTC 时间 | tarkov=塔科夫时间 | tick | long/short | profile | stock | shares |
+   trigger | fill_avg | gross | borrowed | margin | proceeds | settlement | debt`
+- 离线补算时 `tarkov/tick` 是历史 tick，`UTC 时间` 是补算实际发生的现实时间，
+  两者对照即可复盘隔夜强平。
+- SPT 标准日志（`user/logs/spt/sptYYYYMMDD.log`）仍然保留每条 `[StockMarket] 强平...` 记录。

@@ -7,6 +7,30 @@ using TarkFX.StockMarket.Server.Models;
 
 namespace TarkFX.StockMarket.Server.Core;
 
+/// <summary>强平扫描用的只读快照。</summary>
+public sealed record LeveragedSnapshot(
+    string ProfileId,
+    string StockId,
+    int Leverage,
+    int Shares,
+    decimal EntryPrice,
+    decimal Margin,
+    decimal Borrowed);
+
+/// <summary>空头强平扫描用的只读快照。</summary>
+public sealed record ShortSnapshot(
+    string ProfileId,
+    string StockId,
+    int Leverage,
+    int Shares,
+    decimal EntryPrice,
+    decimal Proceeds,
+    decimal Margin,
+    double OpenedMarketSeconds);
+
+/// <summary>转生时归还券行的股数。</summary>
+public sealed record ReleasedBorrow(string StockId, int Shares);
+
 /// <summary>
 /// 持仓存储（按 sessionId）。
 ///
@@ -31,12 +55,21 @@ public sealed class PortfolioStore
     private readonly object _sync = new();
     private readonly string _path;
     private readonly ISptLogger<PortfolioStore> _logger;
+    private readonly StockMarketConfig _config;
 
     private PortfolioFile _file;
 
-    public PortfolioStore(ISptLogger<PortfolioStore> logger, ModHelper modHelper)
+    /// <summary>Debug 模式下 T+1 直接归零。</summary>
+    public double EffectiveTPlusOneSeconds =>
+        _config.DebugMode ? 0.0 : TPlusOneMarketSeconds;
+
+    public PortfolioStore(
+        ISptLogger<PortfolioStore> logger,
+        ModHelper modHelper,
+        StockMarketConfig config)
     {
         _logger = logger;
+        _config = config;
         string modFolder = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
         _path = Path.Combine(modFolder, "data", "portfolios.json");
         _file = Load();
@@ -100,12 +133,13 @@ public sealed class PortfolioStore
         lock (_sync)
         {
             Position position = GetOrCreatePosition(_file, profileId, stockId);
+            double threshold = EffectiveTPlusOneSeconds;
             double best = double.MaxValue;
 
             foreach (Lot lot in position.Lots)
             {
                 if (lot.Shares <= 0) continue;
-                double remaining = TPlusOneMarketSeconds - (nowMarketSeconds - lot.BuyMarketSeconds);
+                double remaining = threshold - (nowMarketSeconds - lot.BuyMarketSeconds);
                 if (remaining > 0 && remaining < best)
                     best = remaining;
             }
@@ -155,22 +189,20 @@ public sealed class PortfolioStore
         }
     }
 
-    private static List<Lot> SellableLots(Position position, double nowMarketSeconds)
+    private List<Lot> SellableLots(Position position, double nowMarketSeconds)
     {
+        double threshold = EffectiveTPlusOneSeconds;
+
         return position.Lots
             .Where(lot => lot.Shares > 0 &&
-                          nowMarketSeconds - lot.BuyMarketSeconds >= TPlusOneMarketSeconds)
+                          nowMarketSeconds - lot.BuyMarketSeconds >= threshold)
             .OrderBy(lot => lot.BuyMarketSeconds)
             .ToList();
     }
 
     private static Position GetOrCreatePosition(PortfolioFile file, string profileId, string stockId)
     {
-        if (!file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
-        {
-            portfolio = new Portfolio();
-            file.Profiles[profileId] = portfolio;
-        }
+        Portfolio portfolio = GetOrCreatePortfolio(file, profileId);
 
         if (!portfolio.Positions.TryGetValue(stockId, out Position? position))
         {
@@ -179,6 +211,346 @@ public sealed class PortfolioStore
         }
 
         return position;
+    }
+
+    private static Portfolio GetOrCreatePortfolio(PortfolioFile file, string profileId)
+    {
+        if (!file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+        {
+            portfolio = new Portfolio();
+            file.Profiles[profileId] = portfolio;
+        }
+
+        return portfolio;
+    }
+
+    // ══════════════════ 杠杆持仓 ══════════════════
+
+    public LeveragedPosition? GetLeveraged(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return null;
+
+            if (!portfolio.Leveraged.TryGetValue(stockId, out LeveragedPosition? position))
+                return null;
+
+            return new LeveragedPosition
+            {
+                Leverage = position.Leverage,
+                Shares = position.Shares,
+                EntryPrice = position.EntryPrice,
+                Margin = position.Margin,
+                Borrowed = position.Borrowed,
+                OpenedTick = position.OpenedTick,
+                OpenedMarketSeconds = position.OpenedMarketSeconds
+            };
+        }
+    }
+
+    public bool HasLeveraged(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            return _file.Profiles.TryGetValue(profileId, out Portfolio? portfolio)
+                   && portfolio.Leveraged.ContainsKey(stockId);
+        }
+    }
+
+    public void OpenLeveraged(
+        string profileId, string stockId, int leverage, int shares,
+        decimal entryPrice, decimal margin, decimal borrowed,
+        long tick, double nowMarketSeconds)
+    {
+        lock (_sync)
+        {
+            Portfolio portfolio = GetOrCreatePortfolio(_file, profileId);
+            portfolio.Leveraged[stockId] = new LeveragedPosition
+            {
+                Leverage = leverage,
+                Shares = shares,
+                EntryPrice = entryPrice,
+                Margin = margin,
+                Borrowed = borrowed,
+                OpenedTick = tick,
+                OpenedMarketSeconds = nowMarketSeconds
+            };
+            SaveLocked();
+        }
+    }
+
+    public bool RemoveLeveraged(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return false;
+
+            if (!portfolio.Leveraged.Remove(stockId))
+                return false;
+
+            SaveLocked();
+            return true;
+        }
+    }
+
+    /// <summary>所有玩家的杠杆持仓快照（用于强平扫描，调用时不在锁内）。</summary>
+    public List<LeveragedSnapshot> GetOpenLeveragedSnapshot()
+    {
+        lock (_sync)
+        {
+            var result = new List<LeveragedSnapshot>();
+
+            foreach (KeyValuePair<string, Portfolio> profile in _file.Profiles)
+            {
+                foreach (KeyValuePair<string, LeveragedPosition> position in profile.Value.Leveraged)
+                {
+                    result.Add(new LeveragedSnapshot(
+                        profile.Key,
+                        position.Key,
+                        position.Value.Leverage,
+                        position.Value.Shares,
+                        position.Value.EntryPrice,
+                        position.Value.Margin,
+                        position.Value.Borrowed));
+                }
+            }
+
+            return result;
+        }
+    }
+
+    // ══════════════════ 做空 ══════════════════
+
+    public ShortPosition? GetShort(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return null;
+
+            if (!portfolio.Shorts.TryGetValue(stockId, out ShortPosition? position))
+                return null;
+
+            return new ShortPosition
+            {
+                Leverage = position.Leverage,
+                Shares = position.Shares,
+                EntryPrice = position.EntryPrice,
+                Proceeds = position.Proceeds,
+                Margin = position.Margin,
+                OpenedTick = position.OpenedTick,
+                OpenedMarketSeconds = position.OpenedMarketSeconds
+            };
+        }
+    }
+
+    public bool HasShort(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            return _file.Profiles.TryGetValue(profileId, out Portfolio? portfolio)
+                   && portfolio.Shorts.ContainsKey(stockId);
+        }
+    }
+
+    public void OpenShort(
+        string profileId, string stockId, int leverage, int shares,
+        decimal entryPrice, decimal proceeds, decimal margin,
+        long tick, double nowMarketSeconds)
+    {
+        lock (_sync)
+        {
+            Portfolio portfolio = GetOrCreatePortfolio(_file, profileId);
+            portfolio.Shorts[stockId] = new ShortPosition
+            {
+                Leverage = leverage,
+                Shares = shares,
+                EntryPrice = entryPrice,
+                Proceeds = proceeds,
+                Margin = margin,
+                OpenedTick = tick,
+                OpenedMarketSeconds = nowMarketSeconds
+            };
+            SaveLocked();
+        }
+    }
+
+    public bool RemoveShort(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return false;
+
+            if (!portfolio.Shorts.Remove(stockId))
+                return false;
+
+            SaveLocked();
+            return true;
+        }
+    }
+
+    /// <summary>所有玩家的空头快照（用于强平扫描，调用时不在锁内）。</summary>
+    public List<ShortSnapshot> GetOpenShortsSnapshot()
+    {
+        lock (_sync)
+        {
+            var result = new List<ShortSnapshot>();
+
+            foreach (KeyValuePair<string, Portfolio> profile in _file.Profiles)
+            {
+                foreach (KeyValuePair<string, ShortPosition> position in profile.Value.Shorts)
+                {
+                    result.Add(new ShortSnapshot(
+                        profile.Key,
+                        position.Key,
+                        position.Value.Leverage,
+                        position.Value.Shares,
+                        position.Value.EntryPrice,
+                        position.Value.Proceeds,
+                        position.Value.Margin,
+                        position.Value.OpenedMarketSeconds));
+                }
+            }
+
+            return result;
+        }
+    }
+
+    // ══════════════════ 欠债 ══════════════════
+
+    public decimal GetDebt(string profileId, string currency)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return 0m;
+
+            return portfolio.Debts.TryGetValue(currency, out decimal debt)
+                ? Math.Max(0m, debt)
+                : 0m;
+        }
+    }
+
+    public Dictionary<string, decimal> GetDebts(string profileId)
+    {
+        lock (_sync)
+        {
+            var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return result;
+
+            foreach (KeyValuePair<string, decimal> entry in portfolio.Debts)
+            {
+                if (entry.Value > 0m)
+                    result[entry.Key] = entry.Value;
+            }
+
+            return result;
+        }
+    }
+
+    public bool HasDebt(string profileId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return false;
+
+            return portfolio.Debts.Values.Any(value => value > 0m);
+        }
+    }
+
+    public void AddDebt(string profileId, string currency, decimal amount)
+    {
+        if (amount <= 0m)
+            return;
+
+        lock (_sync)
+        {
+            Portfolio portfolio = GetOrCreatePortfolio(_file, profileId);
+            portfolio.Debts.TryGetValue(currency, out decimal current);
+            portfolio.Debts[currency] = current + amount;
+            SaveLocked();
+        }
+    }
+
+    /// <summary>还款；返回剩余欠债。负数会被夹成 0。</summary>
+    public decimal ReduceDebt(string profileId, string currency, decimal amount)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return 0m;
+
+            if (!portfolio.Debts.TryGetValue(currency, out decimal current))
+                return 0m;
+
+            decimal left = Math.Max(0m, current - Math.Max(0m, amount));
+            if (left <= 0m)
+                portfolio.Debts.Remove(currency);
+            else
+                portfolio.Debts[currency] = left;
+
+            SaveLocked();
+            return left;
+        }
+    }
+
+    // ══════════════════ 持股合计 / 转生 ══════════════════
+
+    /// <summary>现货 + 杠杆多 + 空头合计股数（个人持仓上限用）。</summary>
+    public int GetTotalShares(string profileId, string stockId)
+    {
+        lock (_sync)
+        {
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return 0;
+
+            int total = 0;
+
+            if (portfolio.Positions.TryGetValue(stockId, out Position? position))
+                total += position.Lots.Sum(lot => lot.Shares);
+
+            if (portfolio.Leveraged.TryGetValue(stockId, out LeveragedPosition? leveraged))
+                total += leveraged.Shares;
+
+            if (portfolio.Shorts.TryGetValue(stockId, out ShortPosition? shortPosition))
+                total += shortPosition.Shares;
+
+            return Math.Max(0, total);
+        }
+    }
+
+    /// <summary>
+    /// 转生平账：清空全部持仓、杠杆、空头与欠债，不做任何行情/邮件结算。
+    /// 返回需要归还给券行的股数。
+    /// </summary>
+    public List<ReleasedBorrow> ResetProfile(string profileId)
+    {
+        lock (_sync)
+        {
+            var released = new List<ReleasedBorrow>();
+
+            if (!_file.Profiles.TryGetValue(profileId, out Portfolio? portfolio))
+                return released;
+
+            foreach (KeyValuePair<string, ShortPosition> entry in portfolio.Shorts)
+            {
+                if (entry.Value.Shares > 0)
+                    released.Add(new ReleasedBorrow(entry.Key, entry.Value.Shares));
+            }
+
+            portfolio.Positions.Clear();
+            portfolio.Leveraged.Clear();
+            portfolio.Shorts.Clear();
+            portfolio.Debts.Clear();
+
+            SaveLocked();
+            return released;
+        }
     }
 
     private PortfolioFile Load()

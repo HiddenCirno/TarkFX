@@ -33,7 +33,7 @@ public readonly record struct CandleResult(Candle Candle, int Regime);
 public sealed class PriceEngine
 {
     /// <summary>行情模型版本。改算法必须 +1。</summary>
-    public const int ModelVersion = 3;
+    public const int ModelVersion = 4;
 
     /// <summary>
     /// 每 tick 的内部子步数。

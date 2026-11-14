@@ -15,18 +15,15 @@ namespace TarkFX.StockMarket.Server.Core;
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public sealed class StockMarketUpdateService(
-    MarketStore market,
+    MarketRunner runner,
     ISptLogger<StockMarketUpdateService> logger) : IOnUpdate
 {
     public Task<bool> OnUpdateAsync(long secondsSinceLastRun, CancellationToken cancellationToken)
     {
         try
         {
-            if (market.AdvanceToNow())
-            {
-                long tick = market.CurrentTick(MarketClock.NowUnix());
-                logger.Debug($"[StockMarket] 已推进到 tick {tick}");
-            }
+            // 逐 tick 生成 K 线，并在每个 tick 内检查强平
+            runner.AdvanceToNow();
         }
         catch (Exception ex)
         {

@@ -13,6 +13,7 @@ namespace TarkFX.StockMarket.Client.Core
 
         internal static ConfigEntry<int> VisibleCandles { get; private set; }
         internal static ConfigEntry<bool> RedUpGreenDown { get; private set; }
+        internal static ConfigEntry<float> YAxisZoom { get; private set; }
 
         internal static Color UpColor => RedUpGreenDown.Value ? Red : Green;
         internal static Color DownColor => RedUpGreenDown.Value ? Green : Red;
@@ -33,6 +34,16 @@ namespace TarkFX.StockMarket.Client.Core
                 "红涨绿跌 / Red Up, Green Down",
                 true,
                 "开启 = A 股习惯（红涨绿跌）；关闭 = 美股习惯（绿涨红跌）。");
+
+            YAxisZoom = config.Bind(
+                "1. 图表 / Chart",
+                "Y 轴放宽系数 / Y-Axis Zoom",
+                1.35f,
+                new ConfigDescription(
+                    "Y 轴总跨度 = 数据区间 × 该系数。\n" +
+                    "1.0 = 贴边铺满；1.35 = 上下各留约 15% 空白（默认）；越大越平缓。\n" +
+                    "想让小波动看起来不那么陡就调大，想看清细节就调小。",
+                    new AcceptableValueRange<float>(1.0f, 2.5f)));
         }
     }
 }

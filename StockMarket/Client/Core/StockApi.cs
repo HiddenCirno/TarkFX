@@ -39,11 +39,5 @@ namespace TarkFX.StockMarket.Client.Core
 
         internal static Task<JObject> GetCandlesAsync(string stockId, int count = 200) =>
             PostAsync("/stock-market/candles", new { stockId, count });
-
-        internal static Task<JObject> BuyAsync(string stockId, int shares) =>
-            PostAsync("/stock-market/buy", new { stockId, shares });
-
-        internal static Task<JObject> SellAsync(string stockId, int shares) =>
-            PostAsync("/stock-market/sell", new { stockId, shares });
     }
 }
